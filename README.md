@@ -8,9 +8,26 @@ A small Python overlay that connects to Rocket League's local Stats API, tracks 
 
 ## Setup
 
-This setup is done entirely in PowerShell. Press **Win + X** and click **Terminal** (Windows 11) or **Windows PowerShell** (Windows 10) to open it. Every command block below is something you copy and paste — in order, top to bottom.
+### Quick install (recommended)
 
-### 1. Install Python and Git
+Two clicks:
+
+1. **Download** [`install.bat`](https://raw.githubusercontent.com/Florentde29/rl-h2h/main/install.bat) (right-click the link → *Save link as…*) and put it anywhere — Downloads is fine.
+2. **Double-click** the file. A console window opens and walks through everything: Python (if missing), Git (if missing), cloning the app to `Documents\rl-h2h\`, installing dependencies, finding your Rocket League install (Steam *or* Epic), and patching its Stats API config. ~2 minutes on a fresh machine, ~10 seconds on a re-run.
+
+When it finishes you'll be asked whether to launch the app and whether to add a Desktop shortcut. There's only one thing the installer can't do for you:
+
+- **Set Rocket League to Borderless** in *Settings → Video → Display Mode*. The overlay can't render over true-fullscreen DirectX.
+
+The installer is **safe to re-run any time** — it detects what's already there and just updates the missing pieces. If your Rocket League is on a non-standard install (Microsoft Store, WeGame, custom location), a folder picker pops up so you can point at it manually.
+
+### Manual install (advanced / for troubleshooting)
+
+If you'd rather see every step yourself — or the quick install hit a snag — these are the same steps the installer runs.
+
+This is done entirely in PowerShell. Press **Win + X** and click **Terminal** (Windows 11) or **Windows PowerShell** (Windows 10) to open it. Every command block below is something you copy and paste — in order, top to bottom.
+
+#### 1. Install Python and Git
 
 ```powershell
 winget install --id Python.Python.3.12 -e
@@ -21,7 +38,7 @@ After both finish, **close and reopen PowerShell** so the new tools land on your
 
 > If `winget` isn't recognised (older Windows 10 builds), install the **App Installer** package from the Microsoft Store first — that ships winget. As a manual alternative, download Python from <https://www.python.org/downloads/> (tick *"Add python.exe to PATH"*) and Git from <https://git-scm.com/download/win>.
 
-### 2. Download this project
+#### 2. Download this project
 
 ```powershell
 cd $env:USERPROFILE\Documents
@@ -31,7 +48,7 @@ cd rl-h2h
 
 That clones the project into `Documents\rl-h2h\` and `cd`s into it. Stay in this folder for the next command.
 
-### 3. Install the Python dependencies
+#### 3. Install the Python dependencies
 
 ```powershell
 python -m pip install -r requirements.txt
@@ -39,7 +56,7 @@ python -m pip install -r requirements.txt
 
 About 30 seconds. You only do this once.
 
-### 4. Enable the Rocket League Stats API
+#### 4. Enable the Rocket League Stats API
 
 Open this file in Notepad (Rocket League ships it):
 
@@ -56,11 +73,11 @@ Port=49123
 
 Save it, then **fully exit Rocket League** if it's running. RL only reads this `.ini` at launch — saving while the game is open does nothing.
 
-### 5. Set Rocket League to Borderless
+#### 5. Set Rocket League to Borderless
 
 In RL: **Settings → Video → Display Mode → Borderless**. Overlays can't render over true-fullscreen DirectX.
 
-### 6. First run
+#### 6. First run
 
 In the same PowerShell window:
 
