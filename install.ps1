@@ -26,6 +26,25 @@ function Has-Command($name) {
     $null -ne (Get-Command $name -ErrorAction SilentlyContinue)
 }
 
+function Confirm-Yes($prompt) {
+    # Default-yes prompt: empty input or anything starting with y/Y means yes.
+    $resp = Read-Host "$prompt [Y/n]"
+    return ($resp -eq "" -or $resp -match '^[yY]')
+}
+
+function Install-WingetPackage($wingetId, $verifyCmd, $displayName) {
+    if (-not (Has-Command winget)) {
+        throw "winget not found. Install 'App Installer' from the Microsoft Store, or install $displayName manually and re-run."
+    }
+    Write-Info "Installing $displayName via winget (silent)..."
+    & winget install --id $wingetId -e --silent --accept-source-agreements --accept-package-agreements | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "winget install of $displayName failed (exit $LASTEXITCODE)" }
+    Refresh-Path
+    if (-not (Has-Command $verifyCmd)) {
+        throw "$displayName installed but '$verifyCmd' isn't on PATH yet. Restart your computer and re-run this installer."
+    }
+}
+
 # ── Banner ──────────────────────────────────────────────────────────────────
 Write-Host ""
 Write-Host "  Rocket League Head-to-Head Overlay - Installer" -ForegroundColor White
@@ -58,16 +77,7 @@ if (Has-Command python) {
     }
 }
 if ($needsPython) {
-    if (-not (Has-Command winget)) {
-        throw "winget not found. Install 'App Installer' from the Microsoft Store, or install Python 3.12 manually from https://www.python.org/downloads/ and re-run."
-    }
-    Write-Info "Installing Python 3.12 via winget (silent, ~1 min)..."
-    & winget install --id Python.Python.3.12 -e --silent --accept-source-agreements --accept-package-agreements | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "winget Python install failed (exit $LASTEXITCODE)" }
-    Refresh-Path
-    if (-not (Has-Command python)) {
-        throw "Python install completed but 'python' isn't on PATH yet. Restart your computer and re-run this installer."
-    }
+    Install-WingetPackage "Python.Python.3.12" "python" "Python 3.12"
     Write-Ok "Python installed"
 }
 
@@ -76,16 +86,7 @@ Write-Step "Checking Git"
 if (Has-Command git) {
     Write-Ok "Git already installed"
 } else {
-    if (-not (Has-Command winget)) {
-        throw "winget not found. Install Git manually from https://git-scm.com/download/win and re-run."
-    }
-    Write-Info "Installing Git via winget (silent)..."
-    & winget install --id Git.Git -e --silent --accept-source-agreements --accept-package-agreements | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "winget Git install failed (exit $LASTEXITCODE)" }
-    Refresh-Path
-    if (-not (Has-Command git)) {
-        throw "Git install completed but 'git' isn't on PATH yet. Restart your computer and re-run this installer."
-    }
+    Install-WingetPackage "Git.Git" "git" "Git"
     Write-Ok "Git installed"
 }
 
@@ -175,6 +176,8 @@ function Find-RLViaEpic {
         foreach ($f in (Get-ChildItem $mdir -Filter *.item -ErrorAction SilentlyContinue)) {
             try {
                 $j = Get-Content $f.FullName -Raw | ConvertFrom-Json
+                # "Sugar" is Epic's internal codename for Rocket League. DisplayName is
+                # the user-facing fallback in case Epic changes the codename.
                 $matchesRL = ($j.DisplayName -eq "Rocket League") -or ($j.MainGameAppName -eq "Sugar")
                 if ($matchesRL -and $j.InstallLocation -and
                     (Test-Path (Join-Path $j.InstallLocation "TAGame\Config"))) {
@@ -285,8 +288,7 @@ $startMenuLnk = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\Ro
 New-Shortcut $startMenuLnk $startBat $icon
 Write-Ok "Start Menu shortcut created"
 
-$desktopResp = Read-Host "Add a Desktop shortcut too? [Y/n]"
-if ($desktopResp -ne "n" -and $desktopResp -ne "N") {
+if (Confirm-Yes "Add a Desktop shortcut too?") {
     $desktopLnk = Join-Path $env:USERPROFILE "Desktop\Rocket League H2H.lnk"
     New-Shortcut $desktopLnk $startBat $icon
     Write-Ok "Desktop shortcut created"
@@ -302,8 +304,7 @@ Write-Host "  Set Rocket League to BORDERLESS in Settings > Video > Display Mode
 Write-Host "  The overlay can't render over true fullscreen DirectX." -ForegroundColor DarkGray
 Write-Host ""
 
-$launchResp = Read-Host "Launch Rocket League H2H now? [Y/n]"
-if ($launchResp -ne "n" -and $launchResp -ne "N") {
+if (Confirm-Yes "Launch Rocket League H2H now?") {
     Start-Process -FilePath $startBat
     Write-Ok "Launched. Look for the H2H icon in the system tray (bottom-right)."
 }
