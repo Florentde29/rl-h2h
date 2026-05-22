@@ -22,8 +22,8 @@ GAMEPAD_BUTTONS = {
     "y":           ("Key", "BTN_NORTH",  1),    # Xbox Y / PS Triangle
     "lb":          ("Key", "BTN_TL",     1),    # Xbox LB / PS L1
     "rb":          ("Key", "BTN_TR",     1),    # Xbox RB / PS R1
-    "back":        ("Key", "BTN_SELECT", 1),    # Xbox Back/View / PS Share
-    "start":       ("Key", "BTN_START",  1),    # Xbox Start/Menu / PS Options
+    "back":        ("Key", "BTN_START",  1),    # Xbox Back/View / PS Share  (XInput maps View→BTN_START)
+    "start":       ("Key", "BTN_SELECT", 1),    # Xbox Start/Menu / PS Options (XInput maps Menu→BTN_SELECT)
     "lstick":      ("Key", "BTN_THUMBL", 1),    # left stick click
     "rstick":      ("Key", "BTN_THUMBR", 1),    # right stick click
     "dpad_up":     ("Absolute", "ABS_HAT0Y", -1),
