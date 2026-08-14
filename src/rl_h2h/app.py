@@ -109,6 +109,7 @@ def main():
 
     state = {
         "in_match": False,
+        "stats_connected": False,
         "h2h_held": False,
         "session_held": False,
         "summary_visible": False,
@@ -192,12 +193,12 @@ def main():
                     state["h2h_html"]
                     + h2h_footer_html(cfg, expanded=False, session=None)
                 )
-        elif state["h2h_held"]:
-            # Held outside a match. h2h_html already carries the right status for
-            # every such state — waiting, connected-idle, or a disabled Stats API
-            # — but it used to be rendered only in the in_match branch above, so
-            # it was unreachable and the key looked dead for ALL of them. That is
-            # the symptom that hid the disabled API in the first place.
+        elif state["h2h_held"] and not state["stats_connected"]:
+            # Held while the feed is down: explain why, since h2h_html holds the
+            # reason and used to be rendered only in the in_match branch above —
+            # unreachable exactly when disconnected, which is what made the key
+            # look dead. Deliberately NOT shown while connected: "waiting for a
+            # match" is normal, and a panel on every menu press is just noise.
             overlay.set_html(state["h2h_html"])
         elif state["summary_visible"]:
             overlay.set_html(state["summary_html"])
@@ -438,6 +439,9 @@ def main():
         update_overlay()
 
     def on_status(connected: bool):
+        # Recorded before the in-match early return, or the flag goes stale for
+        # the whole match and update_overlay would misjudge the idle panel.
+        state["stats_connected"] = connected
         if state["in_match"]:
             return
         if connected:
