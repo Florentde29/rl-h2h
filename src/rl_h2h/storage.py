@@ -36,9 +36,23 @@ def save_players(players: dict) -> None:
     safe_atomic_write_text(PLAYERS_PATH, json.dumps(players, indent=2, sort_keys=True), "players")
 
 
-def append_match(record: dict) -> None:
-    with MATCHES_PATH.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(record) + "\n")
+def append_match(record: dict) -> bool:
+    """Append one match to matches.jsonl. False on failure; never raises.
+
+    This was the only unprotected write in the app, and it ran before the
+    players-cache update — so a single OSError (OneDrive holding a lock on
+    Documents is the common one on Windows) propagated out of the Qt slot and
+    skipped the rest of the handler, silently costing the head-to-head record
+    for that match. matches.jsonl only feeds the MMR graph, so losing a line
+    here must never take players.json down with it.
+    """
+    try:
+        with MATCHES_PATH.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record) + "\n")
+        return True
+    except OSError as e:
+        print(f"[matches] could not append match: {e}", file=sys.stderr)
+        return False
 
 
 _PLAYLIST_BY_PLAYER_COUNT = {2: "1v1", 4: "2v2", 6: "3v3"}
