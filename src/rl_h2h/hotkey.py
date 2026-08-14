@@ -10,6 +10,7 @@ from typing import Optional
 from PySide6.QtCore import QObject, Signal
 from pynput import keyboard
 
+from . import diag
 from .applog import hotkey_log
 
 
@@ -142,6 +143,26 @@ class _KBDLLHOOKSTRUCT(ctypes.Structure):
     ]
 
 
+# Last (result, reason) reported by is_rl_focused, so the diagnostic below only
+# writes a line when the answer actually flips — it's polled every 250ms.
+_last_focus_diag: tuple = (None, None)
+
+
+def _focus_diag(result: bool, reason: str) -> bool:
+    """Log a focus-gate transition to startup.log and return `result` unchanged.
+
+    The gate at app.py's update_overlay() hides the overlay whenever this is
+    False, so a silently-wrong False here disables every hotkey at once —
+    keyboard and gamepad alike. Logging the *reason* (and the Win32 error when
+    we can't query the process) is what separates 'RL isn't focused' from
+    'RL is focused but the OS won't tell us who it is'."""
+    global _last_focus_diag
+    if (result, reason) != _last_focus_diag:
+        _last_focus_diag = (result, reason)
+        diag.log(f"is_rl_focused -> {result}  ({reason})")
+    return result
+
+
 def is_rl_focused() -> bool:
     """True when Rocket League is the foreground window. Always True on non-Windows."""
     if _user32 is None or _kernel32 is None:
@@ -149,22 +170,28 @@ def is_rl_focused() -> bool:
     try:
         hwnd = _user32.GetForegroundWindow()
         if not hwnd:
-            return False
+            return _focus_diag(False, "no foreground window")
         pid = wintypes.DWORD()
         _user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
         h_proc = _kernel32.OpenProcess(0x1000, False, pid.value)  # PROCESS_QUERY_LIMITED_INFORMATION
         if not h_proc:
-            return False
+            # Error 5 (ERROR_ACCESS_DENIED) here means the foreground process is
+            # protected — e.g. by an anti-cheat — and we can never identify it.
+            return _focus_diag(
+                False, f"OpenProcess failed on pid {pid.value}, "
+                       f"WinError {ctypes.get_last_error()}")
         try:
             buf = ctypes.create_unicode_buffer(260)
             size = wintypes.DWORD(260)
             if _kernel32.QueryFullProcessImageNameW(h_proc, 0, buf, ctypes.byref(size)):
-                return buf.value.lower().endswith("rocketleague.exe")
+                match = buf.value.lower().endswith("rocketleague.exe")
+                return _focus_diag(match, f"foreground exe = {buf.value}")
         finally:
             _kernel32.CloseHandle(h_proc)
-    except Exception:
-        return False
-    return False
+    except Exception as e:
+        return _focus_diag(False, f"{type(e).__name__}: {e}")
+    return _focus_diag(False, "QueryFullProcessImageNameW failed, "
+                              f"WinError {ctypes.get_last_error()}")
 
 
 class HotkeyManager(QObject):

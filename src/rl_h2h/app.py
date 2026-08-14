@@ -12,6 +12,7 @@ from PySide6.QtGui import QAction
 from PySide6.QtWidgets import QApplication, QMenu, QMessageBox, QSystemTrayIcon
 
 from . import colors
+from . import diag
 from .applog import mmr_log, set_hotkey_log_enabled
 from .config import load_config, save_config
 from .hotkey import HotkeyManager, MenuHotkeyListener, capture_next_input, is_rl_focused
@@ -35,6 +36,10 @@ from .graph import render_graph_pixmap
 
 
 def main():
+    # Must run before anything prints: under pythonw (start.bat) both streams
+    # are None and every print() is silently dropped, which is why none of the
+    # existing diagnostics have ever reached a normal user.
+    console_captured = diag.capture_console()
     if hasattr(sys.stdout, "reconfigure"):
         with contextlib.suppress(Exception):
             sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -52,6 +57,7 @@ def main():
 
     cfg = load_config()
     colors.apply_overrides(cfg)
+    diag.log_startup(cfg, console_captured)
     # Flip the hotkey diagnostic log before any HotkeyManager logs its bindings.
     set_hotkey_log_enabled(bool(cfg.get("hotkey_debug_log", False)))
     players_db = load_players()
@@ -318,6 +324,9 @@ def main():
         attempt(0)
 
     def on_initialized(payload: dict):
+        # The H2H view needs in_match; if this never fires, Tab/pad_lb do nothing
+        # no matter how healthy the hotkey listeners are.
+        diag.log("match initialized -> in_match=True")
         state["in_match"] = True
         hide_summary()  # next match starting → drop any in-flight post-match popup
         # Auto-detect self in 1v1: only one teammate on my side = me. Persist to config.
@@ -893,6 +902,7 @@ def main():
             if last_tray_state[0] == connected:
                 return
             last_tray_state[0] = connected
+            diag.log(f"stats api {'connected' if connected else 'disconnected'}")
             label = "Connected" if connected else "Disconnected"
             if status_action is not None:
                 status_action.setText(f"Status: {label}")
@@ -921,6 +931,9 @@ def main():
     print(f"        matches → {MATCHES_PATH}")
     print(f"        players → {PLAYERS_PATH}")
 
+    # Presence of this line separates "main() crashed during setup" from
+    # "the app is alive and idling in the Qt loop".
+    diag.log("entering Qt event loop")
     rc = app.exec()
     stats.stop()
     hotkey_h2h.stop()
