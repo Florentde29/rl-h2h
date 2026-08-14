@@ -404,9 +404,12 @@ def main():
             "playlist": playlist_from_player_count(len(payload["players"])),
             "players": payload["players"],
         }
-        append_match(record)
+        # players.json is the sole source of truth for the H2H record;
+        # matches.jsonl only feeds the MMR graph. Persist the record first so a
+        # failed append can never cost us the head-to-head history.
         update_players_cache(players_db, record)
         save_players(players_db)
+        append_match(record)
         score_str = ""
         if isinstance(record.get("score"), list) and len(record["score"]) == 2:
             mt = payload["myTeam"]
