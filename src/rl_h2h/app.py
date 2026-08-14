@@ -902,13 +902,16 @@ def main():
         # has no console, and the idle overlay text never renders because the
         # H2H view also requires an in-progress match — which needs the very
         # socket that's disabled.
+        # Deferred: showMessage() before the event loop runs is dropped on
+        # Windows, because the shell hasn't registered the tray icon yet.
+        # singleShot fires once app.exec() is up and the icon really exists.
         if ini_problem:
-            tray.showMessage(
+            QTimer.singleShot(3000, lambda: tray.showMessage(
                 "Rocket League Stats API is disabled",
                 f"{ini_problem}\n\nThe overlay cannot show anything until this is fixed.",
-                QSystemTrayIcon.Warning,
+                QSystemTrayIcon.MessageIcon.Warning,
                 30_000,
-            )
+            ))
 
         # Skip the Qt setText/setToolTip churn when the connection state hasn't
         # changed — connection_status emits on every reconnect attempt failure
