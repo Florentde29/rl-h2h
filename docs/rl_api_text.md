@@ -11,15 +11,28 @@ HUDs, overlays, trackers, etc.) ingest these messages.
 
 ## 1. Enabling the API (player-side setup)
 
-Edit `<Install Dir>\TAGame\Config\DefaultStatsAPI.ini` **before launching the
-client**. Changes made while the game is running require a restart.
+Two files hold this config, and the game reads the *user* one at launch:
+
+| File | Role |
+| ---- | ---- |
+| `<Install Dir>\TAGame\Config\DefaultStatsAPI.ini` | Shipped template. Carries an `[IniVersion]` timestamp; when it's newer than the user file's, RL regenerates the user file from it. |
+| `<Documents>\My Games\Rocket League\TAGame\Config\TAStatsAPI.ini` | What the game actually reads. Regenerated from the template — so edits here can be reverted by a patch. |
+
+Set both, **before launching the client**. Changes made while the game is
+running require a restart.
 
 | Setting          | Type  | Default       | Description                                                                                  |
 | ---------------- | ----- | ------------- | -------------------------------------------------------------------------------------------- |
 | `PacketSendRate` | float | `0` (disabled)| Number of `UpdateState` packets per second. Must be > 0 to enable the socket. Capped at 120. |
-| `Port`           | int   | `49123`       | Local TCP port the WebSocket listens on.                                                     |
+| `Port`           | int   | `49123`       | Local TCP port. Set to 0 to disable. Must differ from `WebPort`.                              |
+| `WebPort`        | int   | `49124`       | Added in v2.72 (Aug 2026): port for "web connections", i.e. the real WebSocket endpoint. Unused by this project. |
 
 Connect to: `ws://127.0.0.1:<Port>` (default `ws://127.0.0.1:49123`).
+
+> **Patches reset `PacketSendRate` to `0`.** Observed after v2.72 (Aug 2026):
+> both files came back with `PacketSendRate=0`, silently killing the feed. The
+> `[IniVersion]` timestamp in the user file records when it was regenerated,
+> which is a quick way to confirm a patch was responsible.
 
 ---
 
@@ -54,6 +67,12 @@ directly if it's already a dict.
 
 The websockets handshake probe sometimes fails or hangs; in this project we
 skip the WS probe and connect via raw TCP (`c9c27ea`).
+
+This still holds after v2.72. That patch added "WebSocket support" to the
+Stats API, but on a *separate* port (`WebPort`, default 49124) — the original
+`Port` (49123) still speaks raw NDJSON, so no client change is needed. To
+confirm on a given install, read the socket without sending anything, then
+retry with an RFC 6455 `Upgrade` request: only one of the two will answer.
 
 ---
 

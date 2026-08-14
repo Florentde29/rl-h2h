@@ -11,7 +11,7 @@ from PySide6.QtCore import QLockFile, QObject, QTimer, Signal
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import QApplication, QMenu, QMessageBox, QSystemTrayIcon
 
-from . import colors
+from . import colors, statsapi_ini
 from .applog import mmr_log, set_hotkey_log_enabled
 from .config import load_config, save_config
 from .hotkey import HotkeyManager, MenuHotkeyListener, capture_next_input, is_rl_focused
@@ -32,6 +32,17 @@ from .storage import (
 )
 from .tray import make_tray_icon
 from .graph import render_graph_pixmap
+
+
+# One label for every surface that reports the disabled Stats API (overlay,
+# tray tooltip, tray menu) so a wording change can't go stale in one of them.
+# The full diagnosis — file paths and the exact cause — goes to stderr and the
+# tray balloon instead; it's far too long for a status line.
+STATS_API_DISABLED = "Stats API disabled in Rocket League"
+# Overlay variant: idle_html renders as rich text, so <br> puts the instruction
+# on its own line. The tray tooltip and menu use the bare label above — they're
+# single-line plain text and would show the markup verbatim.
+STATS_API_DISABLED_OVERLAY = f"{STATS_API_DISABLED}<br>see README step 4"
 
 
 def main():
@@ -59,8 +70,18 @@ def main():
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
 
+    # A game patch can reset PacketSendRate to 0, which kills the stats socket
+    # and leaves the overlay permanently blank with nothing to explain why.
+    # Say so up front rather than waiting forever for a connection.
+    ini_problem = statsapi_ini.diagnose()
+    if ini_problem:
+        print(f"[statsapi] {ini_problem}", file=sys.stderr)
+
+    startup_message = (STATS_API_DISABLED_OVERLAY if ini_problem
+                       else "Waiting for Rocket League…")
+
     overlay = Overlay(cfg)
-    overlay.set_html(idle_html("Waiting for Rocket League…"))
+    overlay.set_html(idle_html(startup_message))
     stats = StatsClient(cfg["host"], cfg["port"],
                         api_dump_enabled=bool(cfg.get("api_debug_dump", False)))
     session = SessionStats(recent_size=cfg.get("recent_size", 5))
@@ -88,11 +109,12 @@ def main():
 
     state = {
         "in_match": False,
+        "stats_connected": False,
         "h2h_held": False,
         "session_held": False,
         "summary_visible": False,
         "summary_html": "",
-        "h2h_html": idle_html("Waiting for Rocket League…"),
+        "h2h_html": idle_html(startup_message),
         "h2h_expanded": bool(cfg.get("h2h_default_expanded", False)),
         "session_view": cfg.get("session_view", "session"),
         "graph_playlist": cfg.get("graph_playlist", "2v2"),
@@ -171,6 +193,13 @@ def main():
                     state["h2h_html"]
                     + h2h_footer_html(cfg, expanded=False, session=None)
                 )
+        elif state["h2h_held"] and not state["stats_connected"]:
+            # Held while the feed is down: explain why, since h2h_html holds the
+            # reason and used to be rendered only in the in_match branch above —
+            # unreachable exactly when disconnected, which is what made the key
+            # look dead. Deliberately NOT shown while connected: "waiting for a
+            # match" is normal, and a panel on every menu press is just noise.
+            overlay.set_html(state["h2h_html"])
         elif state["summary_visible"]:
             overlay.set_html(state["summary_html"])
         else:
@@ -410,13 +439,19 @@ def main():
         update_overlay()
 
     def on_status(connected: bool):
+        # Recorded before the in-match early return, or the flag goes stale for
+        # the whole match and update_overlay would misjudge the idle panel.
+        state["stats_connected"] = connected
         if state["in_match"]:
             return
         if connected:
             state["h2h_html"] = idle_html("Connected — waiting for match…")
         else:
+            # Name the cause when we know it — a generic "is it enabled?" is
+            # unhelpful once we've read the .ini and found it switched off.
             state["h2h_html"] = idle_html(
-                "Disconnected — is RL running with the Stats API enabled?")
+                STATS_API_DISABLED_OVERLAY if ini_problem
+                else "Disconnected — is RL running with the Stats API enabled?")
         update_overlay()
 
     def on_event_for_session(event: str, data: dict):
@@ -792,13 +827,17 @@ def main():
     status_action = None
     if QSystemTrayIcon.isSystemTrayAvailable():
         tray = QSystemTrayIcon(make_tray_icon())
-        tray.setToolTip("Rocket League H2H — starting…")
+        # Balloons are easy to miss and Windows suppresses them outright while a
+        # game is fullscreen or Do Not Disturb is on — so the disabled-API state
+        # also lives in the tooltip and the menu, which are always inspectable.
+        starting_label = STATS_API_DISABLED if ini_problem else "starting…"
+        tray.setToolTip(f"Rocket League H2H — {starting_label}")
 
         menu = QMenu()
         title_action = QAction("Rocket League H2H")
         title_action.setEnabled(False)
         menu.addAction(title_action)
-        status_action = QAction("Status: starting…")
+        status_action = QAction(f"Status: {starting_label}")
         status_action.setEnabled(False)
         menu.addAction(status_action)
         menu.addSeparator()
@@ -883,6 +922,21 @@ def main():
         tray.setContextMenu(menu)
         tray.show()
 
+        # The only channel that reaches a user launched via start.bat: pythonw
+        # has no console, and the idle overlay text never renders because the
+        # H2H view also requires an in-progress match — which needs the very
+        # socket that's disabled.
+        # Deferred: showMessage() before the event loop runs is dropped on
+        # Windows, because the shell hasn't registered the tray icon yet.
+        # singleShot fires once app.exec() is up and the icon really exists.
+        if ini_problem:
+            QTimer.singleShot(3000, lambda: tray.showMessage(
+                "Rocket League Stats API is disabled",
+                f"{ini_problem}\n\nThe overlay cannot show anything until this is fixed.",
+                QSystemTrayIcon.MessageIcon.Warning,
+                30_000,
+            ))
+
         # Skip the Qt setText/setToolTip churn when the connection state hasn't
         # changed — connection_status emits on every reconnect attempt failure
         # during a backoff storm, and Qt does compare strings, but building the
@@ -893,7 +947,12 @@ def main():
             if last_tray_state[0] == connected:
                 return
             last_tray_state[0] = connected
-            label = "Connected" if connected else "Disconnected"
+            if connected:
+                label = "Connected"
+            else:
+                # "Disconnected" is technically true but useless here: the
+                # socket will never come up until the .ini is fixed.
+                label = STATS_API_DISABLED if ini_problem else "Disconnected"
             if status_action is not None:
                 status_action.setText(f"Status: {label}")
             tray.setToolTip(f"Rocket League H2H — {label}")

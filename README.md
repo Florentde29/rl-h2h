@@ -41,20 +41,25 @@ About 30 seconds. You only do this once.
 
 ### 4. Enable the Rocket League Stats API
 
-Open this file in Notepad (Rocket League ships it):
+There are **two** files, and you need `PacketSendRate` set in both:
 
 ```
 <Rocket League install folder>\TAGame\Config\DefaultStatsAPI.ini
+%USERPROFILE%\Documents\My Games\Rocket League\TAGame\Config\TAStatsAPI.ini
 ```
 
-Make sure it contains these two lines:
+The second one is the file Rocket League actually reads at launch; the first is the template it regenerates that file from. Editing only the template is not reliable, and editing only the user file gets undone the next time RL decides to regenerate it. The install-folder file usually needs admin rights to save; the one under Documents does not.
+
+Make sure each contains:
 
 ```
 PacketSendRate=2
 Port=49123
 ```
 
-Save it, then **fully exit Rocket League** if it's running. RL only reads this `.ini` at launch — saving while the game is open does nothing.
+Then **fully exit Rocket League** before saving. RL reads these at launch only — saving while the game is open does nothing.
+
+> **A game patch can reset `PacketSendRate` back to `0`, which silently switches the whole overlay off.** Patch v2.72 (August 2026) did exactly that. If the overlay stops working after an update, check these two files first. Since v2.72 they also carry a `WebPort` setting (default `49124`) for RL's new WebSocket endpoint — this app doesn't use it, leave it alone.
 
 ### 5. Set Rocket League to Borderless
 
@@ -196,7 +201,8 @@ The setting persists in `data/config.json` (`auto_update: true|false`). Launchin
 
 ## Troubleshooting
 
-- **Overlay never shows / Stats API never connects.** Make sure you fully exited Rocket League before saving `DefaultStatsAPI.ini`. The .ini is read once at launch — if RL was already running, your edits are ignored. Confirm the file contains `PacketSendRate=2` (or any non-zero) and `Port=49123`.
+- **Overlay never shows / Stats API never connects.** Almost always `PacketSendRate=0`. Check **both** `DefaultStatsAPI.ini` (install folder) and `TAStatsAPI.ini` (`Documents\My Games\Rocket League\TAGame\Config\`) — a game patch resets them, most recently v2.72 in August 2026. The app now warns about this with a tray notification at startup. Set both to `PacketSendRate=2` with RL **fully closed**, then relaunch the game; the .ini is read once at launch, so edits made while RL is running are ignored.
+- **Quick config check.** `python -m rl_h2h.statsapi_ini` (with `PYTHONPATH` set to `src`) prints every `StatsAPI.ini` it finds with its `PacketSendRate`, then a verdict. Works with Rocket League closed, and needs no tray or notifications — useful when the app shows nothing and you want to know whether that means "fine" or "the check never ran".
 - **Overlay invisible during a match.** Set RL to **Borderless** display mode (Settings → Video → Display Mode). True fullscreen owns the whole screen; no overlay can render over it.
 - **Tray icon missing.** Windows hides newly-installed tray icons behind the chevron `^` next to the clock by default. Click the chevron, drag the Rocket League H2H icon onto the taskbar to pin it. Or: Settings → Personalization → Taskbar → Other system tray icons → enable `pythonw.exe`.
 - **Gamepad bindings silently ignored.** The `inputs` package needs to be installed (`pip install -r requirements.txt`). The console will say `[hotkey] gamepad listener watching: [...]` on startup if it's working.
