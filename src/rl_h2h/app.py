@@ -802,13 +802,18 @@ def main():
     status_action = None
     if QSystemTrayIcon.isSystemTrayAvailable():
         tray = QSystemTrayIcon(make_tray_icon())
-        tray.setToolTip("Rocket League H2H — starting…")
+        # Balloons are easy to miss and Windows suppresses them outright while a
+        # game is fullscreen or Do Not Disturb is on — so the disabled-API state
+        # also lives in the tooltip and the menu, which are always inspectable.
+        starting_label = ("Stats API disabled in Rocket League"
+                          if ini_problem else "starting…")
+        tray.setToolTip(f"Rocket League H2H — {starting_label}")
 
         menu = QMenu()
         title_action = QAction("Rocket League H2H")
         title_action.setEnabled(False)
         menu.addAction(title_action)
-        status_action = QAction("Status: starting…")
+        status_action = QAction(f"Status: {starting_label}")
         status_action.setEnabled(False)
         menu.addAction(status_action)
         menu.addSeparator()
@@ -915,7 +920,13 @@ def main():
             if last_tray_state[0] == connected:
                 return
             last_tray_state[0] = connected
-            label = "Connected" if connected else "Disconnected"
+            if connected:
+                label = "Connected"
+            else:
+                # "Disconnected" is technically true but useless here: the
+                # socket will never come up until the .ini is fixed.
+                label = ("Stats API disabled in Rocket League" if ini_problem
+                         else "Disconnected")
             if status_action is not None:
                 status_action.setText(f"Status: {label}")
             tray.setToolTip(f"Rocket League H2H — {label}")

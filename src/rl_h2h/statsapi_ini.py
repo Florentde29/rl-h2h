@@ -162,3 +162,20 @@ def diagnose() -> Optional[str]:
     return (f"Rocket League's Stats API has no PacketSendRate setting in "
             f"{', '.join(f.name for f in inis)}; the socket stays off. "
             f"Add PacketSendRate={RECOMMENDED_RATE} with the game closed.")
+
+
+if __name__ == "__main__":
+    # `python -m rl_h2h.statsapi_ini` — answers the question without needing the
+    # GUI, a tray, or Windows notifications to be enabled.
+    found = find_inis()
+    if not found:
+        print("No StatsAPI .ini found — could not locate a Rocket League install.")
+        print("Point Notepad at <RL install>\\TAGame\\Config\\ yourself, or run")
+        print("tools/diag_stats_api.py with Rocket League running.")
+        raise SystemExit(2)
+    for f in found:
+        print(f"{f}\n    PacketSendRate = {packet_send_rate(f)}")
+    print()
+    problem = diagnose()
+    print(problem or "Stats API config looks OK.")
+    raise SystemExit(1 if problem else 0)
