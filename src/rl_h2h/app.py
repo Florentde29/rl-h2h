@@ -181,6 +181,14 @@ def main():
                     state["h2h_html"]
                     + h2h_footer_html(cfg, expanded=False, session=None)
                 )
+        elif state["h2h_held"] and ini_problem:
+            # in_match can never become true while the Stats API is off, so the
+            # H2H branch above is unreachable and the key would appear dead.
+            # Pressing it is exactly when the user wants to know why.
+            overlay.set_html(idle_html(
+                "Stats API disabled in Rocket League (PacketSendRate=0) "
+                "— see README step 4"
+            ))
         elif state["summary_visible"]:
             overlay.set_html(state["summary_html"])
         else:
