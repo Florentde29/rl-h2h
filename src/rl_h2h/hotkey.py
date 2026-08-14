@@ -34,6 +34,49 @@ GAMEPAD_BUTTONS = {
     "rt":          ("Absolute", "ABS_RZ",  "thresh"),  # Xbox RT / PS R2
 }
 GAMEPAD_TRIGGER_THRESHOLD = 80  # 0..255
+GAMEPAD_RESCAN_INTERVAL = 2.0  # seconds between hot-plug probes
+
+
+# `inputs` builds its DeviceManager singleton at import time, so a controller
+# plugged in *after* we import it never lands in `devices.gamepads` and
+# `get_gamepad()` keeps raising UnpluggedError forever. Rebuilding the manager
+# is not an option: `inputs.EVENT_MAP` stores `type_codes` as a one-shot
+# generator expression, so a second `DeviceManager()` gets an empty
+# `codes['type_codes']` and every subsequent event decode raises
+# UnknownEventType. Re-running the device probe in place is the safe path.
+_pad_rescan_lock = threading.Lock()
+
+
+def _rescan_gamepads(_inputs) -> int:
+    """Re-probe for gamepads on the existing `inputs.devices` manager.
+
+    Returns the number of gamepads now known (0 when still unplugged, or when
+    the platform has no probe we can safely re-run). Never raises."""
+    devices = _inputs.devices
+    with _pad_rescan_lock:
+        try:
+            if getattr(_inputs, "WIN", False):
+                if getattr(devices, "xinput", None) is None:
+                    return len(devices.gamepads)  # no XInput dll → nothing to find
+                # XInput slots are probed from scratch, so drop any stale
+                # GamePad left over from a pad that was unplugged mid-session;
+                # otherwise gamepads[0] keeps raising UnpluggedError even once
+                # a working pad is back. Windows GamePads hold no OS handles
+                # (their "character device" is an in-memory BytesIO), so
+                # discarding them leaks nothing.
+                devices.gamepads.clear()
+                devices._detect_gamepads()
+            elif getattr(_inputs, "NIX", False):
+                # _find_devices() de-dups on realpath, so re-running it only
+                # appends /dev/input nodes that appeared since last time —
+                # clearing first would make it skip the pad we already know.
+                devices._find_devices()
+            else:
+                return len(devices.gamepads)
+            devices._update_all_devices()
+        except Exception as e:
+            hotkey_log(f"rescan_gamepads failed: {type(e).__name__}: {e}")
+        return len(devices.gamepads)
 
 
 # Cached Win32 bindings for is_rl_focused and the menu LL hook — hoisted to
@@ -262,7 +305,14 @@ class HotkeyManager(QObject):
                     print("[hotkey] no gamepad detected; will keep watching", file=sys.stderr)
                     hotkey_log("pad_loop: UnpluggedError (no gamepad detected yet)")
                     warned_no_pad = True
-                self._pad_stop.wait(2.0)
+                self._pad_stop.wait(GAMEPAD_RESCAN_INTERVAL)
+                if self._pad_stop.is_set():
+                    break
+                # Hot-plug: pick up a controller connected after we started.
+                found = _rescan_gamepads(_inputs)
+                if found:
+                    print("[hotkey] gamepad connected", file=sys.stderr)
+                    hotkey_log(f"pad_loop: rescan found {found} gamepad(s)")
                 continue
             except Exception as e:
                 print(f"[hotkey] gamepad read error: {type(e).__name__}: {e}", file=sys.stderr)
@@ -541,6 +591,11 @@ def capture_next_input(on_done) -> None:
                 events = _inputs.get_gamepad()
             except _inputs.UnpluggedError:
                 pad_stop.wait(1.0)
+                if pad_stop.is_set():
+                    return
+                # Same hot-plug rescan as _pad_loop, so a pad can be bound
+                # even if it wasn't connected when the app started.
+                _rescan_gamepads(_inputs)
                 continue
             except Exception:
                 pad_stop.wait(1.0)
