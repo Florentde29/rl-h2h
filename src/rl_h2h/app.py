@@ -39,6 +39,10 @@ from .graph import render_graph_pixmap
 # The full diagnosis — file paths and the exact cause — goes to stderr and the
 # tray balloon instead; it's far too long for a status line.
 STATS_API_DISABLED = "Stats API disabled in Rocket League"
+# Overlay variant: idle_html renders as rich text, so <br> puts the instruction
+# on its own line. The tray tooltip and menu use the bare label above — they're
+# single-line plain text and would show the markup verbatim.
+STATS_API_DISABLED_OVERLAY = f"{STATS_API_DISABLED}<br>see README step 4"
 
 
 def main():
@@ -73,7 +77,7 @@ def main():
     if ini_problem:
         print(f"[statsapi] {ini_problem}", file=sys.stderr)
 
-    startup_message = (f"{STATS_API_DISABLED} — see README step 4" if ini_problem
+    startup_message = (STATS_API_DISABLED_OVERLAY if ini_problem
                        else "Waiting for Rocket League…")
 
     overlay = Overlay(cfg)
@@ -442,7 +446,7 @@ def main():
             # Name the cause when we know it — a generic "is it enabled?" is
             # unhelpful once we've read the .ini and found it switched off.
             state["h2h_html"] = idle_html(
-                f"{STATS_API_DISABLED} — see README step 4" if ini_problem
+                STATS_API_DISABLED_OVERLAY if ini_problem
                 else "Disconnected — is RL running with the Stats API enabled?")
         update_overlay()
 

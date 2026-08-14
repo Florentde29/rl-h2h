@@ -70,9 +70,9 @@ skip the WS probe and connect via raw TCP (`c9c27ea`).
 
 This still holds after v2.72. That patch added "WebSocket support" to the
 Stats API, but on a *separate* port (`WebPort`, default 49124) — the original
-`Port` (49123) still speaks raw NDJSON, so no client change is needed. Confirm
-with `tools/diag_stats_api.py`, which reads the socket without sending, then
-retries with an RFC 6455 `Upgrade` request to tell the two apart.
+`Port` (49123) still speaks raw NDJSON, so no client change is needed. To
+confirm on a given install, read the socket without sending anything, then
+retry with an RFC 6455 `Upgrade` request: only one of the two will answer.
 
 ---
 

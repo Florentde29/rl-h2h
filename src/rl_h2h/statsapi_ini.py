@@ -26,9 +26,6 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-# The discovery helpers and the PacketSendRate rule below are mirrored in
-# tools/diag_stats_api.py, which is deliberately standalone (it must run with
-# no rl_h2h import available). Keep the two in sync.
 RECOMMENDED_RATE = 2
 _RATE_RE = re.compile(r"^\s*PacketSendRate\s*=\s*([0-9]*\.?[0-9]+)\s*$", re.M | re.I)
 
@@ -172,8 +169,7 @@ if __name__ == "__main__":
     found = find_inis()
     if not found:
         print("No StatsAPI .ini found — could not locate a Rocket League install.")
-        print("Point Notepad at <RL install>\\TAGame\\Config\\ yourself, or run")
-        print("tools/diag_stats_api.py with Rocket League running.")
+        print("Point Notepad at <RL install>\\TAGame\\Config\\ yourself (see README).")
         raise SystemExit(2)
     for f in found:
         print(f"{f}\n    PacketSendRate = {packet_send_rate(f)}")
