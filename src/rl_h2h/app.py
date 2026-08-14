@@ -11,7 +11,7 @@ from PySide6.QtCore import QLockFile, QObject, QTimer, Signal
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import QApplication, QMenu, QMessageBox, QSystemTrayIcon
 
-from . import colors
+from . import colors, statsapi_ini
 from .applog import mmr_log, set_hotkey_log_enabled
 from .config import load_config, save_config
 from .hotkey import HotkeyManager, MenuHotkeyListener, capture_next_input, is_rl_focused
@@ -59,8 +59,18 @@ def main():
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
 
+    # A game patch can reset PacketSendRate to 0, which kills the stats socket
+    # and leaves the overlay permanently blank with nothing to explain why.
+    # Say so up front rather than waiting forever for a connection.
+    ini_problem = statsapi_ini.diagnose()
+    if ini_problem:
+        print(f"[statsapi] {ini_problem}", file=sys.stderr)
+
     overlay = Overlay(cfg)
-    overlay.set_html(idle_html("Waiting for Rocket League…"))
+    overlay.set_html(idle_html(
+        "Stats API disabled in Rocket League — see README step 4"
+        if ini_problem else "Waiting for Rocket League…"
+    ))
     stats = StatsClient(cfg["host"], cfg["port"],
                         api_dump_enabled=bool(cfg.get("api_debug_dump", False)))
     session = SessionStats(recent_size=cfg.get("recent_size", 5))
@@ -882,6 +892,18 @@ def main():
 
         tray.setContextMenu(menu)
         tray.show()
+
+        # The only channel that reaches a user launched via start.bat: pythonw
+        # has no console, and the idle overlay text never renders because the
+        # H2H view also requires an in-progress match — which needs the very
+        # socket that's disabled.
+        if ini_problem:
+            tray.showMessage(
+                "Rocket League Stats API is disabled",
+                f"{ini_problem}\n\nThe overlay cannot show anything until this is fixed.",
+                QSystemTrayIcon.Warning,
+                30_000,
+            )
 
         # Skip the Qt setText/setToolTip churn when the connection state hasn't
         # changed — connection_status emits on every reconnect attempt failure
