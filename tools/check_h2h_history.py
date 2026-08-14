@@ -40,6 +40,17 @@ except ImportError as e:  # pragma: no cover - guidance beats a traceback
     raise SystemExit(2)
 
 
+# Platforms the wire actually emits (docs/rl_api_text.md). A key whose platform
+# is not one of these did not come from Rocket League — test/simulated records
+# have been found in real match logs, and they must never be counted as
+# opponents or written into players.json.
+REAL_PLATFORMS = {"epic", "ps4", "ps5", "xboxone", "xboxseries", "steam", "switch", "psynet"}
+
+
+def is_real_player(key: str) -> bool:
+    return key.split("|", 1)[0].strip().lower() in REAL_PLATFORMS
+
+
 def _fmt_day(iso: str | None) -> str:
     t = parse_iso(iso)
     return t.astimezone(timezone.utc).strftime("%Y-%m-%d") if t else "?"
@@ -74,22 +85,41 @@ def main() -> int:
             if p.get("team") != my_team:            # opponents only
                 faced[p["key"]] += 1
                 names[p["key"]] = p.get("name", "?")
+    synthetic = {k for k in faced if not is_real_player(k)}
+    if synthetic:
+        print(f"  !! {len(synthetic)} synthetic/test opponent(s) ignored "
+              f"(platform not one of {sorted(REAL_PLATFORMS)[:4]}…)")
+        print(f"     e.g. {sorted(synthetic)[:3]}")
+        print("     These are not real matches — see the note at the end.")
+        for k in synthetic:
+            del faced[k]
+
     repeats = {k: n for k, n in faced.items() if n > 1}
     total = len(faced)
-    print(f"  distinct opponents faced : {total}")
+    print(f"  distinct REAL opponents faced : {total}")
     if total:
         pct = 100.0 * len(repeats) / total
-        print(f"  faced 2+ times           : {len(repeats)}  ({pct:.1f}%)")
-        print(f"  faced 3+ times           : {sum(1 for n in repeats.values() if n >= 3)}")
+        print(f"  faced 2+ times                : {len(repeats)}  ({pct:.1f}%)")
+        print(f"  faced 3+ times                : {sum(1 for n in repeats.values() if n >= 3)}")
     if repeats:
-        print("\n  Opponents you have met more than once:")
-        for k, n in sorted(repeats.items(), key=lambda kv: -kv[1])[:15]:
-            rec = stored.get(k, {}).get(BUCKET_VS, {})
-            shown = f"{rec.get('wins', 0)}-{rec.get('losses', 0)}" if rec else "MISSING"
-            print(f"    {n}x  {names[k][:24]:<24} {k:<28} H2H card shows {shown}")
+        print("\n  Real opponents you have met more than once:")
+        wrong = 0
+        for k, n in sorted(repeats.items(), key=lambda kv: -kv[1])[:20]:
+            rec = (stored.get(k) or {}).get(BUCKET_VS) or {}
+            w, l = rec.get("wins", 0), rec.get("losses", 0)
+            shown = f"{w}-{l}" if (w or l) else "NOT RECORDED"
+            flag = ""
+            if w + l != n:
+                wrong += 1
+                flag = f"   <-- expected {n} game(s), card has {w + l}"
+            print(f"    {n}x  {names[k][:24]:<24} {k:<40} card shows {shown}{flag}")
         print("\n  These are the only players who can ever show anything but NEW.")
+        if wrong:
+            print(f"  {wrong} of them do NOT match the log — that IS a bug.")
+        else:
+            print("  Every one of them is recorded correctly. The H2H feature is working.")
     else:
-        print("\n  You have never faced the same opponent twice in this log.")
+        print("\n  You have never faced the same real opponent twice in this log.")
         print("  Every opponent showing NEW is therefore CORRECT, not a bug.")
 
     # --- 2. Has players.json fallen behind the match log? ---------------
@@ -113,12 +143,20 @@ def main() -> int:
     # (key, bucket, stored_wl, expected_wl); bucket is the one that actually
     # differs, so a teammate-only gap isn't reported against the 'vs' numbers.
     behind: list[tuple] = []
+    fake_in_log = 0
     for key, exp in replay.items():
+        if not is_real_player(key):
+            # Synthetic records live only in matches.jsonl; players.json never
+            # having them is correct, so reporting it as a gap would be noise.
+            fake_in_log += 1
+            continue
         got = stored.get(key)
         for bucket in ("vs", "with"):
             if _wl(exp, bucket) != _wl(got, bucket):
                 behind.append((key, bucket, None if got is None else _wl(got, bucket),
                                _wl(exp, bucket)))
+    if fake_in_log:
+        print(f"  ({fake_in_log} synthetic player(s) in the match log ignored)")
 
     if not behind:
         print(f"  OK — all {len(replay)} players match the replay exactly.")
@@ -152,8 +190,10 @@ def main() -> int:
                 print(f"  backed up existing file to {backup.name}")
             # Preserve any player the log can't account for (e.g. matches
             # appended before a field existed) rather than dropping them.
+            # Only real players are written back. Rebuilding blind would inject
+            # every synthetic record from the log into the live H2H database.
             merged = dict(stored)
-            merged.update(replay)
+            merged.update({k: v for k, v in replay.items() if is_real_player(k)})
             PLAYERS_PATH.write_text(
                 json.dumps(merged, indent=2, sort_keys=True), encoding="utf-8")
             print(f"  rebuilt players.json — {len(merged)} players")
