@@ -34,6 +34,13 @@ from .tray import make_tray_icon
 from .graph import render_graph_pixmap
 
 
+# One label for every surface that reports the disabled Stats API (overlay,
+# tray tooltip, tray menu) so a wording change can't go stale in one of them.
+# The full diagnosis — file paths and the exact cause — goes to stderr and the
+# tray balloon instead; it's far too long for a status line.
+STATS_API_DISABLED = "Stats API disabled in Rocket League"
+
+
 def main():
     if hasattr(sys.stdout, "reconfigure"):
         with contextlib.suppress(Exception):
@@ -66,11 +73,11 @@ def main():
     if ini_problem:
         print(f"[statsapi] {ini_problem}", file=sys.stderr)
 
+    startup_message = (f"{STATS_API_DISABLED} — see README step 4" if ini_problem
+                       else "Waiting for Rocket League…")
+
     overlay = Overlay(cfg)
-    overlay.set_html(idle_html(
-        "Stats API disabled in Rocket League — see README step 4"
-        if ini_problem else "Waiting for Rocket League…"
-    ))
+    overlay.set_html(idle_html(startup_message))
     stats = StatsClient(cfg["host"], cfg["port"],
                         api_dump_enabled=bool(cfg.get("api_debug_dump", False)))
     session = SessionStats(recent_size=cfg.get("recent_size", 5))
@@ -102,7 +109,7 @@ def main():
         "session_held": False,
         "summary_visible": False,
         "summary_html": "",
-        "h2h_html": idle_html("Waiting for Rocket League…"),
+        "h2h_html": idle_html(startup_message),
         "h2h_expanded": bool(cfg.get("h2h_default_expanded", False)),
         "session_view": cfg.get("session_view", "session"),
         "graph_playlist": cfg.get("graph_playlist", "2v2"),
@@ -181,14 +188,13 @@ def main():
                     state["h2h_html"]
                     + h2h_footer_html(cfg, expanded=False, session=None)
                 )
-        elif state["h2h_held"] and ini_problem:
-            # in_match can never become true while the Stats API is off, so the
-            # H2H branch above is unreachable and the key would appear dead.
-            # Pressing it is exactly when the user wants to know why.
-            overlay.set_html(idle_html(
-                "Stats API disabled in Rocket League (PacketSendRate=0) "
-                "— see README step 4"
-            ))
+        elif state["h2h_held"]:
+            # Held outside a match. h2h_html already carries the right status for
+            # every such state — waiting, connected-idle, or a disabled Stats API
+            # — but it used to be rendered only in the in_match branch above, so
+            # it was unreachable and the key looked dead for ALL of them. That is
+            # the symptom that hid the disabled API in the first place.
+            overlay.set_html(state["h2h_html"])
         elif state["summary_visible"]:
             overlay.set_html(state["summary_html"])
         else:
@@ -433,8 +439,11 @@ def main():
         if connected:
             state["h2h_html"] = idle_html("Connected — waiting for match…")
         else:
+            # Name the cause when we know it — a generic "is it enabled?" is
+            # unhelpful once we've read the .ini and found it switched off.
             state["h2h_html"] = idle_html(
-                "Disconnected — is RL running with the Stats API enabled?")
+                f"{STATS_API_DISABLED} — see README step 4" if ini_problem
+                else "Disconnected — is RL running with the Stats API enabled?")
         update_overlay()
 
     def on_event_for_session(event: str, data: dict):
@@ -813,8 +822,7 @@ def main():
         # Balloons are easy to miss and Windows suppresses them outright while a
         # game is fullscreen or Do Not Disturb is on — so the disabled-API state
         # also lives in the tooltip and the menu, which are always inspectable.
-        starting_label = ("Stats API disabled in Rocket League"
-                          if ini_problem else "starting…")
+        starting_label = STATS_API_DISABLED if ini_problem else "starting…"
         tray.setToolTip(f"Rocket League H2H — {starting_label}")
 
         menu = QMenu()
@@ -936,8 +944,7 @@ def main():
             else:
                 # "Disconnected" is technically true but useless here: the
                 # socket will never come up until the .ini is fixed.
-                label = ("Stats API disabled in Rocket League" if ini_problem
-                         else "Disconnected")
+                label = STATS_API_DISABLED if ini_problem else "Disconnected"
             if status_action is not None:
                 status_action.setText(f"Status: {label}")
             tray.setToolTip(f"Rocket League H2H — {label}")

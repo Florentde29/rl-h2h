@@ -26,6 +26,9 @@ import sys
 from pathlib import Path
 from typing import Optional
 
+# The discovery helpers and the PacketSendRate rule below are mirrored in
+# tools/diag_stats_api.py, which is deliberately standalone (it must run with
+# no rl_h2h import available). Keep the two in sync.
 RECOMMENDED_RATE = 2
 _RATE_RE = re.compile(r"^\s*PacketSendRate\s*=\s*([0-9]*\.?[0-9]+)\s*$", re.M | re.I)
 
@@ -131,25 +134,24 @@ def packet_send_rate(path: Path) -> Optional[float]:
         m = _RATE_RE.search(path.read_text(encoding="utf-8", errors="replace"))
     except OSError:
         return None
-    if not m:
-        return None
-    try:
-        return float(m.group(1))
-    except ValueError:
-        return None
+    # The pattern only matches digits with an optional single dot, so anything
+    # it captures parses as a float.
+    return float(m.group(1)) if m else None
 
 
-def diagnose() -> Optional[str]:
+def diagnose(inis: Optional[list[Path]] = None) -> Optional[str]:
     """A one-line description of why the Stats API won't emit, or None if fine.
+
+    Pass `inis` to reuse an already-gathered list instead of re-scanning.
 
     Returns None when everything looks right *and* when we can't find the game
     at all — an unlocatable install is not evidence of a misconfiguration, and
     warning about it would just be noise for anyone with a custom install."""
-    inis = find_inis()
+    inis = find_inis() if inis is None else inis
     if not inis:
         return None
     rates = {f: packet_send_rate(f) for f in inis}
-    if any(r for r in rates.values() if r):  # non-zero, non-None
+    if any(rates.values()):  # any non-zero rate means the socket will open
         return None
     zeroed = [f for f, r in rates.items() if r == 0]
     if zeroed:
@@ -176,6 +178,6 @@ if __name__ == "__main__":
     for f in found:
         print(f"{f}\n    PacketSendRate = {packet_send_rate(f)}")
     print()
-    problem = diagnose()
+    problem = diagnose(found)
     print(problem or "Stats API config looks OK.")
     raise SystemExit(1 if problem else 0)

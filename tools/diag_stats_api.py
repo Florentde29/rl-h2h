@@ -11,7 +11,11 @@ order, the questions that actually narrow the problem down:
      WebSocket handshake?
 
 Deliberately standalone — no imports from rl_h2h, no third-party packages —
-so it can be copied anywhere and run against any Python 3.8+.
+so it can be copied anywhere and run against any Python 3.8+. That is why the
+install-discovery helpers below (steam_libraries, epic_installs, config_dirs)
+and the PacketSendRate rule are duplicated from ``rl_h2h/statsapi_ini.py``
+rather than imported. **Keep the two in sync** — a fix to one needs applying
+to the other; nothing enforces it.
 
     python tools\\diag_stats_api.py
 
@@ -368,6 +372,7 @@ def main() -> int:
         warn("could not locate a Rocket League config directory")
         for d in ("Steam registry", "Epic manifests"):
             info(f"tried: {d}")
+    rates: list[float] = []
     for d in dirs:
         say("")
         say(f"  {d}")
@@ -393,10 +398,27 @@ def main() -> int:
                 continue
             for line in (body.splitlines() or ["(empty file)"]):
                 info(line)
-            if re.search(r"^\s*PacketSendRate\s*=\s*0*\.?0*\s*$", body, re.M | re.I):
-                bad("PacketSendRate is 0 - the Stats API socket is DISABLED.")
-            elif not re.search(r"PacketSendRate", body, re.I):
-                bad("no PacketSendRate line at all - socket stays disabled.")
+            # Per-file rate is reported, but the enabled/disabled call is made
+            # once across all files below — the game only needs ONE of them to
+            # carry a non-zero rate, so judging each in isolation would flag a
+            # working setup as broken. Same rule as rl_h2h.statsapi_ini.
+            m = re.search(r"^\s*PacketSendRate\s*=\s*([0-9]*\.?[0-9]+)\s*$",
+                          body, re.M | re.I)
+            if m is None:
+                warn("no PacketSendRate line in this file")
+            else:
+                rates.append(float(m.group(1)))
+                info(f"-> PacketSendRate = {m.group(1)}")
+
+    api_enabled = any(rates)
+    if dirs:
+        say("")
+        if api_enabled:
+            ok("PacketSendRate is non-zero - the Stats API should be exporting.")
+        elif rates:
+            bad("PacketSendRate is 0 in every StatsAPI .ini - the socket is DISABLED.")
+        else:
+            bad("no PacketSendRate setting anywhere - the socket stays disabled.")
 
     section("4. Socket probe")
     results = {}
@@ -428,11 +450,15 @@ def main() -> int:
         say("  The Stats API now requires a WebSocket handshake. rl-h2h connects")
         say("  with raw TCP, which is why nothing arrives. Send me this output and")
         say("  I'll implement the handshake.")
+    elif verdict == "refused" and dirs and not api_enabled:
+        say("  Confirmed: PacketSendRate is 0, so Rocket League never opens the")
+        say("  socket. Set it to 2 in the file(s) listed in section 3 above, with")
+        say("  the game fully CLOSED, then relaunch Rocket League.")
     elif verdict == "refused":
         say("  Nothing is listening on the Stats API port. This is a Rocket League")
         say("  side problem, not an rl-h2h bug. Check section 3 above: either the")
-        say("  .ini is missing/reset (PacketSendRate=0), it is in a folder RL no")
-        say("  longer reads, or RL must be fully restarted after editing it.")
+        say("  .ini is in a folder RL no longer reads, or RL must be fully")
+        say("  restarted after editing it.")
         if rl_listeners:
             say("  NOTE: RL is listening on another port - see section 2.")
     else:
