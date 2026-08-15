@@ -38,21 +38,6 @@ def _draw_marker(painter: QPainter, x: int, y: int, color: QColor, radius: float
     painter.drawEllipse(QPointF(x, y), radius, radius)
 
 
-def _draw_key_chip(painter: QPainter, x: int, baseline: int, label: str) -> int:
-    """Rounded key cap (e.g. F7). Returns the x just past it."""
-    painter.setFont(glass.mono(7, bold=True))
-    fm = painter.fontMetrics()
-    w = fm.horizontalAdvance(label) + 10
-    h = fm.height() + 2
-    top = baseline - fm.ascent() - 2
-    painter.setPen(QPen(glass.qc(glass.WHITE, glass.A_CHIP_LINE)))
-    painter.setBrush(QBrush(glass.qc(glass.WHITE, glass.A_CHIP_FILL)))
-    painter.drawRoundedRect(QRectF(x, top, w, h), glass.CHIP_RADIUS, glass.CHIP_RADIUS)
-    painter.setPen(QPen(glass.qc(glass.TEXT, 0.72)))
-    painter.drawText(x + 5, baseline, label)
-    return x + w
-
-
 def _tier_at(mmr: float) -> tuple[str, str] | None:
     for lo, hi, name, color in MMR_RANK_ZONES:
         if lo <= mmr <= hi:
@@ -289,7 +274,7 @@ def _draw_footer(painter: QPainter, cfg: dict, left: int, right: int,
         label = first_keyboard_label(keys_cfg or [])
         if not label:
             continue
-        x = _draw_key_chip(painter, x, baseline, label) + 5
+        x = glass.key_chip(painter, x, baseline, label) + 5
         painter.setFont(glass.font(family, 8))
         painter.setPen(QPen(glass.qc(glass.TEXT, glass.A_MUTED)))
         painter.drawText(x, baseline, verb)

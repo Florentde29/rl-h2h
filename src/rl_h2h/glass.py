@@ -13,7 +13,10 @@ of near-identical hex constants.
 """
 from __future__ import annotations
 
-from PySide6.QtGui import QColor, QFont, QPixmap
+from typing import Optional
+
+from PySide6.QtCore import QRectF, Qt
+from PySide6.QtGui import QBrush, QColor, QFont, QPen, QPixmap
 
 # --- palette (from the Glass redesign) --------------------------------------
 TEXT = (244, 246, 249)          # primary on-surface
@@ -120,6 +123,42 @@ def new_canvas(width: int, height: int, dpr: float = 1.0) -> QPixmap:
 def _blend(base: tuple[int, int, int], over: tuple[int, int, int],
            amount: float) -> tuple[int, int, int]:
     return tuple(round(b + (o - b) * amount) for b, o in zip(base, over))  # type: ignore[return-value]
+
+
+def chip(painter, x: float, baseline: float, text: str, fnt,
+         fg: QColor, fill: Optional[QColor] = None, border: Optional[QColor] = None,
+         radius: int = 4, pad_x: int = 4) -> float:
+    """Small rounded tag. Returns the x just past it, so callers can chain."""
+    painter.setFont(fnt)
+    fm = painter.fontMetrics()
+    w = fm.horizontalAdvance(text) + pad_x * 2
+    h = fm.height() + 1
+    top = baseline - fm.ascent() - 1
+    if fill is not None or border is not None:
+        painter.setPen(QPen(border) if border is not None else Qt.NoPen)
+        painter.setBrush(QBrush(fill) if fill is not None else Qt.NoBrush)
+        painter.drawRoundedRect(QRectF(x, top, w, h), radius, radius)
+    painter.setPen(QPen(fg))
+    painter.drawText(int(x + pad_x), int(baseline), text)
+    return x + w
+
+
+def key_chip(painter, x: float, baseline: float, label: str) -> float:
+    """Keycap for a hotkey hint (F7, TAB…). Returns the x just past it."""
+    return chip(painter, x, baseline, label, mono(7, bold=True),
+                qc(TEXT, 0.72), fill=qc(WHITE, A_CHIP_FILL),
+                border=qc(WHITE, A_CHIP_LINE), radius=CHIP_RADIUS, pad_x=5)
+
+
+def rule(painter, x: int, y: int, w: int, alpha: float = A_DIVIDER) -> None:
+    painter.setPen(QPen(qc(WHITE, alpha)))
+    painter.drawLine(x, y, x + w, y)
+
+
+def section_label(painter, family: str, x: int, baseline: int, text: str) -> None:
+    painter.setFont(font(family, 7, bold=True, letter_spacing=0.16))
+    painter.setPen(QPen(qc(TEXT, A_LABEL)))
+    painter.drawText(x, baseline, text)
 
 
 def card_stylesheet(text_rgb: tuple[int, int, int] = TEXT) -> str:

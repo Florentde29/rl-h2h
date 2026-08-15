@@ -68,7 +68,7 @@ def _mmr_bits(entry: Optional[dict], category: str) -> tuple:
             pick.get("mmr"), pick.get("playlist"))
 
 
-def _stat_cells(ms) -> list[tuple[str, str, Optional[str]]]:
+def match_stat_cells(ms) -> list[tuple[str, str, Optional[str]]]:
     """(label, match value, your value) for every stat that actually fired.
 
     The design mocked a fixed six-cell grid; the app emits up to ten
@@ -136,25 +136,6 @@ def card_height(team_rows: dict[int, list[dict]], stat_cells: list) -> int:
 # --- painting ---------------------------------------------------------------
 def _elide(text: str, limit: int = NAME_MAX) -> str:
     return text if len(text) <= limit else text[:limit - 1] + "…"
-
-
-def _chip(painter: QPainter, x: float, baseline: float, text: str,
-          font, fg: QColor, fill: Optional[QColor] = None,
-          border: Optional[QColor] = None, radius: int = 4,
-          pad_x: int = 4) -> float:
-    """Small rounded tag. Returns the x just past it."""
-    painter.setFont(font)
-    fm = painter.fontMetrics()
-    w = fm.horizontalAdvance(text) + pad_x * 2
-    h = fm.height() + 1
-    top = baseline - fm.ascent() - 1
-    if fill or border:
-        painter.setPen(QPen(border) if border else Qt.NoPen)
-        painter.setBrush(QBrush(fill) if fill else Qt.NoBrush)
-        painter.drawRoundedRect(QRectF(x, top, w, h), radius, radius)
-    painter.setPen(QPen(fg))
-    painter.drawText(int(x + pad_x), int(baseline), text)
-    return x + w
 
 
 def _draw_team_header(painter: QPainter, family: str, x: int, y: int,
@@ -241,7 +222,7 @@ def _draw_player_row(painter: QPainter, family: str, x: int, y: int, w: int,
         t = "FIRST"
         cw = fm.horizontalAdvance(t) + 16
         right_edge -= cw
-        _chip(painter, right_edge, name_baseline, t, f,
+        glass.chip(painter, right_edge, name_baseline, t, f,
               glass.qc(glass.TEXT, glass.A_MUTED),
               fill=glass.qc(glass.WHITE, 0.07), radius=999, pad_x=8)
 
@@ -276,7 +257,7 @@ def _draw_player_row(painter: QPainter, family: str, x: int, y: int, w: int,
             painter.drawText(sx, sub_baseline, str(mmr))
             sx += painter.fontMetrics().horizontalAdvance(str(mmr)) + 7
             if playlist and mmr_category == "best":
-                sx = _chip(painter, sx, sub_baseline, str(playlist).upper(),
+                sx = glass.chip(painter, sx, sub_baseline, str(playlist).upper(),
                            glass.font(family, 6, bold=True, letter_spacing=0.10),
                            glass.qc(glass.TEXT, 0.38),
                            border=glass.qc(glass.WHITE, glass.A_CHIP_LINE)) + 6
@@ -301,7 +282,7 @@ def _draw_player_row(painter: QPainter, family: str, x: int, y: int, w: int,
                 painter.drawText(sx, sub_baseline, f"{score[0]}–{score[1]}")
 
 
-def _draw_stat_grid(painter: QPainter, family: str, x: int, y: int, w: int,
+def draw_stat_grid(painter: QPainter, family: str, x: int, y: int, w: int,
                     cells: list[tuple[str, str, Optional[str]]]) -> None:
     # RIGHT_INSET keeps the right column's value off the canvas edge; ending
     # exactly on it loses the final glyph column to antialiasing.
@@ -343,11 +324,7 @@ def _draw_footer(painter: QPainter, family: str, x: int, y: int, w: int,
         label = first_keyboard_label(keys_cfg or [])
         if not label:
             continue
-        cx = _chip(painter, cx, baseline, label, glass.mono(7, bold=True),
-                   glass.qc(glass.TEXT, 0.72),
-                   fill=glass.qc(glass.WHITE, glass.A_CHIP_FILL),
-                   border=glass.qc(glass.WHITE, glass.A_CHIP_LINE),
-                   radius=glass.CHIP_RADIUS, pad_x=5) + 5
+        cx = glass.key_chip(painter, cx, baseline, label) + 5
         painter.setFont(glass.font(family, 8))
         painter.setPen(QPen(glass.qc(glass.TEXT, glass.A_MUTED)))
         painter.drawText(int(cx), baseline, verb)
@@ -418,7 +395,7 @@ def render_idle_pixmap(cfg: dict, title: str,
         dx = x
         for kind, text in detail:
             if kind == "code":
-                dx = _chip(painter, dx, y + 12, text, glass.mono(7, bold=True),
+                dx = glass.chip(painter, dx, y + 12, text, glass.mono(7, bold=True),
                            glass.qc(glass.ACCENT),
                            fill=glass.qc(glass.ACCENT, 0.10),
                            border=glass.qc(glass.ACCENT, 0.20),
@@ -444,7 +421,7 @@ def render_h2h_pixmap(roster: list[dict], my_team: int, arena: str,
     toggle key — it defaults to whether the grid is present, but stays separate
     so an expanded match with no stats yet still offers to collapse."""
     family = cfg.get("font_family", "Segoe UI")
-    cells = _stat_cells(match_stats) if match_stats is not None else []
+    cells = match_stat_cells(match_stats) if match_stats is not None else []
 
     # Resolve every row once: heights feed both the canvas allocation and the
     # paint pass, so the two can't disagree about how tall the card is.
@@ -538,7 +515,7 @@ def render_h2h_pixmap(roster: list[dict], my_team: int, arena: str,
         painter.setPen(QPen(glass.qc(glass.WHITE, glass.A_DIVIDER)))
         painter.drawLine(x, y, x + w, y)
         y += 1 + H_GRID_GAP_BOT
-        _draw_stat_grid(painter, family, x, y, w, cells)
+        draw_stat_grid(painter, family, x, y, w, cells)
         y += math.ceil(len(cells) / 2) * H_GRID_ROW
 
     y += H_FOOT_GAP

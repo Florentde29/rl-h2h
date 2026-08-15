@@ -19,9 +19,12 @@ from .mmr import MMR_CATEGORIES, MMRClient, RANKED_PLAYLISTS, append_mmr_history
 from .overlay import Overlay
 from .paths import DATA_DIR, MATCHES_PATH, MMR_HISTORY_PATH, MY_MMR_LOG_PATH, PLAYERS_PATH, now_iso
 from .glass_h2h import render_h2h_pixmap, render_idle_pixmap
-from .render_h2h import render_menu_html, session_footer_html
-from .render_summary import render_summary_html
-from .session_stats import MatchStats, SessionStats, render_session_html
+from .glass_screens import (
+    render_menu_pixmap,
+    render_session_pixmap,
+    render_summary_pixmap,
+)
+from .session_stats import MatchStats, SessionStats
 from .stats_client import StatsClient
 from .storage import (
     append_match,
@@ -114,7 +117,7 @@ def main():
         "h2h_held": False,
         "session_held": False,
         "summary_visible": False,
-        "summary_html": "",
+        "summary_payload": None,
         # (title, detail parts, offline) for the painted status card.
         "h2h_status": startup_status,
         "mmr_db": {},
@@ -145,9 +148,11 @@ def main():
         # the user opened it deliberately and may want to reach it from the
         # desktop.
         if state["menu_visible"]:
-            overlay.set_html(render_menu_html(
+            overlay.set_pixmap(render_menu_pixmap(
                 _menu_rows(), state["menu_index"], state["menu_capture"] is not None,
-                menu_key=cfg.get("menu_hotkey") or "f5",
+                cfg, menu_key=cfg.get("menu_hotkey") or "f5",
+                width=cfg["width"] - glass.CARD_PAD_X * 2,
+                dpr=overlay.devicePixelRatioF(),
             ))
             overlay.show()
             overlay.raise_()
@@ -176,10 +181,11 @@ def main():
                 )
                 overlay.set_pixmap(pix)
             else:
-                overlay.set_html(
-                    render_session_html(session)
-                    + session_footer_html(cfg, "session")
-                )
+                overlay.set_pixmap(render_session_pixmap(
+                    session, cfg,
+                    width=cfg["width"] - glass.CARD_PAD_X * 2,
+                    dpr=overlay.devicePixelRatioF(),
+                ))
         elif state["h2h_held"] and state["in_match"]:
             # Expanded H2H adds current-match stats (saves/shots/demos/etc.).
             # Session aggregates live behind the session-hotkey view instead —
@@ -208,8 +214,13 @@ def main():
                 width=cfg["width"] - glass.CARD_PAD_X * 2,
                 dpr=overlay.devicePixelRatioF(),
             ))
-        elif state["summary_visible"]:
-            overlay.set_html(state["summary_html"])
+        elif state["summary_visible"] and state["summary_payload"]:
+            payload, ms = state["summary_payload"]
+            overlay.set_pixmap(render_summary_pixmap(
+                payload, ms, cfg,
+                width=cfg["width"] - glass.CARD_PAD_X * 2,
+                dpr=overlay.devicePixelRatioF(),
+            ))
         else:
             overlay.hide()
             return
@@ -435,7 +446,7 @@ def main():
         # starts (match_initialized) or the user leaves to the menu (match_destroyed),
         # with a 30s safety net for cases where neither event fires.
         if cfg.get("show_match_summary", True):
-            state["summary_html"] = render_summary_html(payload, match_stats)
+            state["summary_payload"] = (payload, match_stats)
             state["summary_visible"] = True
             focus_timer.start()
             update_overlay()
