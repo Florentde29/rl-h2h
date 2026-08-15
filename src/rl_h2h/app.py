@@ -11,7 +11,7 @@ from PySide6.QtCore import QLockFile, QObject, QTimer, Signal
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import QApplication, QMenu, QMessageBox, QSystemTrayIcon
 
-from . import colors, statsapi_ini
+from . import colors, glass, statsapi_ini
 from .applog import mmr_log, set_hotkey_log_enabled
 from .config import load_config, save_config
 from .hotkey import HotkeyManager, MenuHotkeyListener, capture_next_input, is_rl_focused
@@ -164,7 +164,11 @@ def main():
                     mmr_history_cache["snapshots"],
                     mmr_history_cache["matches"],
                     cfg,
-                    canvas_width=cfg["width"] - 32,
+                    # Glass chrome pads 18px each side, and the pixmap is
+                    # painted at the overlay's own device ratio so text stays
+                    # sharp at 125%/150% Windows scaling.
+                    canvas_width=cfg["width"] - glass.CARD_PAD_X * 2,
+                    dpr=overlay.devicePixelRatioF(),
                 )
                 overlay.set_pixmap(pix)
             else:
