@@ -161,7 +161,8 @@ def section_label(painter, family: str, x: int, baseline: int, text: str) -> Non
     painter.drawText(x, baseline, text)
 
 
-def card_stylesheet(text_rgb: tuple[int, int, int] = TEXT) -> str:
+def card_stylesheet(text_rgb: tuple[int, int, int] = TEXT,
+                    tint: Optional[tuple[int, int, int]] = None) -> str:
     """Qt Style Sheet for the glass card behind a painted screen.
 
     The chrome stays in QSS rather than the pixmap because QSS already gives
@@ -174,13 +175,19 @@ def card_stylesheet(text_rgb: tuple[int, int, int] = TEXT) -> str:
     is the base colour blended toward white by the design's overlay alpha,
     carrying the base's own translucency so the game still shows through.
     """
+    # `tint` colours the first stop and the border — used by the match summary,
+    # where the card itself should read as the result before any text is.
     stops = ((0.0, 0.11), (0.55, 0.03), (1.0, 0.06))
     parts = []
-    for pos, white_amount in stops:
-        r, g, b = _blend(CARD_BASE, WHITE, white_amount)
+    for i, (pos, white_amount) in enumerate(stops):
+        over = tint if (tint and i == 0) else WHITE
+        amount = 0.14 if (tint and i == 0) else white_amount
+        r, g, b = _blend(CARD_BASE, over, amount)
         parts.append(f"stop:{pos} rgba({r},{g},{b},199)")
     gradient = f"qlineargradient(x1:0, y1:0, x2:1, y2:1, {', '.join(parts)})"
-    line = f"rgba({WHITE[0]},{WHITE[1]},{WHITE[2]},{round(A_CARD_LINE * 255)})"
+    edge = tint or WHITE
+    edge_a = round((0.26 if tint else A_CARD_LINE) * 255)
+    line = f"rgba({edge[0]},{edge[1]},{edge[2]},{edge_a})"
     return (
         "QLabel {"
         f"  color: rgb({text_rgb[0]},{text_rgb[1]},{text_rgb[2]});"

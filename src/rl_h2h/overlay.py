@@ -49,6 +49,7 @@ class Overlay(QWidget):
             "}"
         )
         self._glass_chrome = glass.card_stylesheet()
+        self._tinted_chrome: dict[tuple, str] = {}
         self._chrome = None
         self._apply_chrome(self._legacy_chrome)
         layout = QVBoxLayout(self)
@@ -74,13 +75,23 @@ class Overlay(QWidget):
         self.adjustSize()
         self._reposition()
 
-    def set_pixmap(self, pix) -> None:
+    def set_pixmap(self, pix, tint=None) -> None:
         """Switches the QLabel from HTML mode to image mode. QLabel handles
         the mode flip internally; the next call to set_html() switches back
         cleanly. Used by every painted screen — the graph, and each screen as
         it moves off the RichText engine (no rounded corners, no gradients,
         no per-span opacity, no SVG)."""
-        self._apply_chrome(self._glass_chrome)
+        # `tint` recolours the card itself — the match summary uses it so the
+        # result reads before any text does. Cached per tint since setStyleSheet
+        # re-polishes the widget and this runs on the repaint timer.
+        if tint is None:
+            self._apply_chrome(self._glass_chrome)
+        else:
+            sheet = self._tinted_chrome.get(tint)
+            if sheet is None:
+                sheet = glass.card_stylesheet(tint=tint)
+                self._tinted_chrome[tint] = sheet
+            self._apply_chrome(sheet)
         self._label.setPixmap(pix)
         self._label.adjustSize()
         self.adjustSize()

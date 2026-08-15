@@ -11,13 +11,16 @@ from PySide6.QtCore import QLockFile, QObject, QTimer, Signal
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import QApplication, QMenu, QMessageBox, QSystemTrayIcon
 
-from . import colors, glass, statsapi_ini
+from . import colors, glass, hero_data, statsapi_ini
 from .applog import mmr_log, set_hotkey_log_enabled
 from .config import load_config, save_config
 from .hotkey import HotkeyManager, MenuHotkeyListener, capture_next_input, is_rl_focused
 from .mmr import MMR_CATEGORIES, MMRClient, RANKED_PLAYLISTS, append_mmr_history, load_mmr_history
 from .overlay import Overlay
-from .paths import DATA_DIR, MATCHES_PATH, MMR_HISTORY_PATH, MY_MMR_LOG_PATH, PLAYERS_PATH, now_iso
+from .paths import (
+    DATA_DIR, MATCHES_PATH, MMR_HISTORY_PATH, MY_MMR_LOG_PATH, PLAYERS_PATH,
+    ROOT_DIR, now_iso,
+)
 from .glass_h2h import render_idle_pixmap
 from .glass_hero import render_h2h_pixmap
 from .glass_screens import (
@@ -119,6 +122,10 @@ def main():
         "session_held": False,
         "summary_visible": False,
         "summary_payload": None,
+        # Self MMR either side of a match, for the summary's arrow. Only
+        # shown once they differ — the post-match poll lands minutes later.
+        "mmr_before": None,
+        "mmr_after": None,
         # (title, detail parts, offline) for the painted status card.
         "h2h_status": startup_status,
         "mmr_db": {},
@@ -152,6 +159,7 @@ def main():
             overlay.set_pixmap(render_menu_pixmap(
                 _menu_rows(), state["menu_index"], state["menu_capture"] is not None,
                 cfg, menu_key=cfg.get("menu_hotkey") or "f5",
+                status=_menu_status(),
                 width=cfg["width"] - glass.CARD_PAD_X * 2,
                 dpr=overlay.devicePixelRatioF(),
             ))
@@ -182,8 +190,11 @@ def main():
                 )
                 overlay.set_pixmap(pix)
             else:
+                if mmr_client.is_enabled():
+                    _ensure_graph_data_loaded()
                 overlay.set_pixmap(render_session_pixmap(
                     session, cfg,
+                    mmr_delta=_session_mmr_delta(),
                     width=cfg["width"] - glass.CARD_PAD_X * 2,
                     dpr=overlay.devicePixelRatioF(),
                 ))
@@ -226,11 +237,17 @@ def main():
             ))
         elif state["summary_visible"] and state["summary_payload"]:
             payload, ms = state["summary_payload"]
-            overlay.set_pixmap(render_summary_pixmap(
-                payload, ms, cfg,
-                width=cfg["width"] - glass.CARD_PAD_X * 2,
-                dpr=overlay.devicePixelRatioF(),
-            ))
+            won = payload.get("winner") == payload.get("myTeam")
+            overlay.set_pixmap(
+                render_summary_pixmap(
+                    payload, ms, cfg, players_db=players_db,
+                    mmr_before=state.get("mmr_before"),
+                    mmr_after=state.get("mmr_after"),
+                    width=cfg["width"] - glass.CARD_PAD_X * 2,
+                    dpr=overlay.devicePixelRatioF(),
+                ),
+                tint=glass.WIN if won else glass.LOSS,
+            )
         else:
             overlay.hide()
             return
@@ -274,6 +291,37 @@ def main():
         update_overlay()
 
     summary_timer.timeout.connect(hide_summary)
+
+    def _self_playlist() -> str:
+        """The playlist the hero block is talking about — the category when it
+        names one, otherwise whichever your best rank is in."""
+        cat = cfg.get("mmr_category", "best")
+        if cat not in ("best", "peak"):
+            return cat
+        entry = (state.get("mmr_db") or {}).get(
+            state.get("self_id") or cfg.get("self_player_id"))
+        return ((entry or {}).get("best") or {}).get("playlist") or ""
+
+    def _session_mmr_delta():
+        if not mmr_client.is_enabled():
+            return None
+        pl = _self_playlist()
+        if not pl:
+            return None
+        return hero_data.session_mmr_delta(
+            mmr_history_cache["snapshots"], pl, session.started_at.isoformat())
+
+    def _menu_status() -> str:
+        """Version and link state, so the menu answers 'is it working?' too."""
+        parts = []
+        try:
+            v = (ROOT_DIR / "VERSION").read_text(encoding="utf-8").strip().splitlines()[0]
+            if v:
+                parts.append(v if v.startswith("v") else f"v{v}")
+        except (OSError, IndexError):
+            pass
+        parts.append("connected" if state["stats_connected"] else "offline")
+        return " · ".join(parts)
 
     def rerender_h2h() -> None:
         """Re-run render_html against the saved roster — used both when a match
@@ -375,6 +423,11 @@ def main():
 
     def on_initialized(payload: dict):
         state["in_match"] = True
+        state["mmr_before"] = hero_data.playlist_mmr(
+            (state.get("mmr_db") or {}).get(
+                state.get("self_id") or cfg.get("self_player_id")),
+            cfg.get("mmr_category", "best"))
+        state["mmr_after"] = None
         hide_summary()  # next match starting → drop any in-flight post-match popup
         # Auto-detect self in 1v1: only one teammate on my side = me. Persist to config.
         if not cfg.get("self_player_id"):
@@ -457,6 +510,10 @@ def main():
         # with a 30s safety net for cases where neither event fires.
         if cfg.get("show_match_summary", True):
             state["summary_payload"] = (payload, match_stats)
+            state["mmr_after"] = hero_data.playlist_mmr(
+                (state.get("mmr_db") or {}).get(
+                    state.get("self_id") or cfg.get("self_player_id")),
+                cfg.get("mmr_category", "best"))
             state["summary_visible"] = True
             focus_timer.start()
             update_overlay()

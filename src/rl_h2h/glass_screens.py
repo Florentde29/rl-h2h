@@ -17,7 +17,8 @@ from PySide6.QtCore import QRectF, Qt
 from PySide6.QtGui import QBrush, QPainter, QPen, QPixmap
 
 from . import glass
-from .constants import SF_DEMOLISH, SF_SAVE, SF_SHOT
+from .arenas import pretty_arena
+from .constants import BUCKET_VS, SF_DEMOLISH, SF_SAVE, SF_SHOT
 from .glass_h2h import (
     H_GRID_ROW, H_HEADER, H_RULE_GAP_BOT, H_RULE_GAP_TOP, RIGHT_INSET,
     draw_stat_grid, match_stat_cells,
@@ -28,10 +29,11 @@ from .session_stats import session_has_split
 H_FOOT_GAP = 14
 H_FOOT_RULE_GAP = 11
 H_FOOT = 15
-H_HERO = 46
-H_PIPS = 18
+H_EYEBROW = 20
+H_HERO = 44
+H_SUM_HERO = 46
 H_SECTION = 22
-H_MENU_ROW = 26
+H_MENU_ROW = 28
 
 
 def _draw_header(painter: QPainter, family: str, x: int, w: int,
@@ -104,14 +106,23 @@ def _session_cells(s) -> list[tuple[str, str, Optional[str]]]:
     return out
 
 
-def render_session_pixmap(s, cfg: dict, width: int = 344,
-                          dpr: float = 1.0) -> QPixmap:
-    """Session card: record and form up top, everything else in the grid."""
+# --- settings menu ----------------------------------------------------------
+def _binding_label(name: Optional[str]) -> str:
+    if not name:
+        return "—"
+    if name.startswith("pad_"):
+        return name[4:].upper().replace("_", " ")
+    return name.upper()
+
+
+def render_session_pixmap(s, cfg: dict, mmr_delta: Optional[int] = None,
+                          width: int = 344, dpr: float = 1.0) -> QPixmap:
+    """Session card. The record leads at hero size; form and best run sit
+    opposite it; everything countable goes to the grid."""
     family = cfg.get("font_family", "Segoe UI")
     cells = _session_cells(s)
     recent = list(s.recent)
-    height = (H_HEADER + H_RULE_GAP_TOP + 1 + H_RULE_GAP_BOT
-              + H_HERO + (H_PIPS if recent else 0)
+    height = (H_EYEBROW + H_HERO
               + (H_RULE_GAP_TOP + 1 + H_RULE_GAP_BOT if cells else 0)
               + math.ceil(len(cells) / 2) * H_GRID_ROW
               + H_FOOT_GAP + 1 + H_FOOT_RULE_GAP + H_FOOT)
@@ -123,60 +134,71 @@ def render_session_pixmap(s, cfg: dict, width: int = 344,
 
     elapsed = int((datetime.now(timezone.utc) - s.started_at).total_seconds())
     hrs, rem = divmod(elapsed, 3600)
-    duration = f"{hrs}h {rem // 60:02d}m" if hrs else f"{rem // 60} min"
-    _draw_header(painter, family, x, w, "SESSION", duration)
+    duration = f"{hrs}H {rem // 60:02d}M" if hrs else f"{rem // 60}M"
+    painter.setFont(glass.font(family, 7, bold=True, letter_spacing=0.18))
+    painter.setPen(QPen(glass.qc(glass.TEXT, glass.A_MUTED)))
+    painter.drawText(x, y + 10, f"SESSION · {duration}")
+    y += H_EYEBROW
 
-    y += H_HEADER + H_RULE_GAP_TOP
-    glass.rule(painter, x, y, w)
-    y += 1 + H_RULE_GAP_BOT
-
-    # Hero: the record at a size you can read mid-match, win rate to its right.
     if s.matches:
-        painter.setFont(glass.mono(18, bold=True))
-        fm = painter.fontMetrics()
         wins, losses = str(s.wins), str(s.losses)
-        cx, base = x, y + 26
+        painter.setFont(glass.mono(27, bold=True))
+        fmb = painter.fontMetrics()
+        base = y + 30
         painter.setPen(QPen(glass.qc(glass.WIN)))
-        painter.drawText(cx, base, wins)
-        cx += fm.horizontalAdvance(wins) + 6
-        painter.setFont(glass.mono(12))
-        painter.setPen(QPen(glass.qc(glass.TEXT, glass.A_GHOST)))
-        painter.drawText(cx, base, "–")
-        cx += painter.fontMetrics().horizontalAdvance("–") + 6
-        painter.setFont(glass.mono(18, bold=True))
+        painter.drawText(x, base, wins)
+        cx = x + fmb.horizontalAdvance(wins) + 4
+        painter.setFont(glass.mono(16))
+        painter.setPen(QPen(glass.qc(glass.TEXT, 0.28)))
+        painter.drawText(int(cx), base, "/")
+        cx += painter.fontMetrics().horizontalAdvance("/") + 4
+        painter.setFont(glass.mono(27, bold=True))
         painter.setPen(QPen(glass.qc(glass.LOSS)))
-        painter.drawText(cx, base, losses)
+        painter.drawText(int(cx), base, losses)
+        cx += fmb.horizontalAdvance(losses) + 9
 
-        pct = f"{s.wins / s.matches * 100:.0f}%"
-        painter.setFont(glass.mono(11, bold=True))
-        pw = painter.fontMetrics().horizontalAdvance(pct)
-        glass.chip(painter, x + w - pw - 16 - RIGHT_INSET, base - 3, pct,
-                   glass.mono(11, bold=True), glass.qc(glass.TEXT),
-                   fill=glass.qc(glass.WHITE, glass.A_CHIP_FILL),
-                   border=glass.qc(glass.WHITE, glass.A_CHIP_LINE),
-                   radius=glass.PILL_RADIUS, pad_x=8)
-        painter.setFont(glass.font(family, 7, letter_spacing=0.10))
+        if mmr_delta is not None:
+            sign = "+" if mmr_delta > 0 else ""
+            bg = glass.WIN if mmr_delta > 0 else (glass.LOSS if mmr_delta < 0 else glass.WHITE)
+            fg = (glass.PILL_TEXT_ON_WIN if mmr_delta > 0 else
+                  glass.PILL_TEXT_ON_LOSS if mmr_delta < 0 else glass.CARD_BASE)
+            glass.chip(painter, cx, base - 13, f"{sign}{mmr_delta}",
+                       glass.mono(8, bold=True), glass.qc(fg),
+                       fill=glass.qc(bg, 1.0 if mmr_delta else 0.14),
+                       radius=glass.CHIP_RADIUS, pad_x=6)
+        painter.setFont(glass.font(family, 6, letter_spacing=0.10))
         painter.setPen(QPen(glass.qc(glass.TEXT, glass.A_GHOST)))
-        painter.drawText(x, y + 40, f"{s.matches} match{'es' if s.matches != 1 else ''}")
+        painter.drawText(int(cx), base, f"{s.wins / s.matches * 100:.0f}% WON")
     else:
         painter.setFont(glass.font(family, 10))
         painter.setPen(QPen(glass.qc(glass.TEXT, glass.A_MUTED)))
         painter.drawText(x, y + 22, "No matches yet this session")
-    y += H_HERO
 
+    right = x + w - RIGHT_INSET
     if recent:
-        # Newest last, matching how the deque reads.
-        px = x
-        for r in recent:
-            painter.setPen(Qt.NoPen)
-            painter.setBrush(QBrush(glass.qc(glass.WIN if r == "W" else glass.LOSS,
-                                             0.95)))
-            painter.drawEllipse(QRectF(px, y, 7, 7))
-            px += 11
-        painter.setFont(glass.font(family, 7, letter_spacing=0.10))
-        painter.setPen(QPen(glass.qc(glass.TEXT, glass.A_GHOST)))
-        painter.drawText(px + 4, y + 7, "recent")
-        y += H_PIPS
+        painter.setFont(glass.mono(8, bold=True))
+        fm = painter.fontMetrics()
+        letters = recent[-5:]
+        total = sum(fm.horizontalAdvance(r) + 3 for r in letters) - 3
+        cx = right - total
+        for r in letters:
+            painter.setPen(QPen(glass.qc(glass.WIN if r == "W" else glass.LOSS,
+                                         1.0 if r == "W" else 0.85)))
+            painter.drawText(int(cx), y + 12, r)
+            cx += fm.horizontalAdvance(r) + 3
+    if s.best_win_streak:
+        painter.setFont(glass.font(family, 7))
+        run = f"W{s.best_win_streak}"
+        painter.setFont(glass.mono(7, bold=True))
+        rw = painter.fontMetrics().horizontalAdvance(run)
+        painter.setPen(QPen(glass.qc(glass.WIN)))
+        painter.drawText(int(right - rw), y + 30, run)
+        painter.setFont(glass.font(family, 7))
+        lbl = "best run "
+        lw = painter.fontMetrics().horizontalAdvance(lbl)
+        painter.setPen(QPen(glass.qc(glass.TEXT, glass.A_FAINT)))
+        painter.drawText(int(right - rw - lw), y + 30, lbl)
+    y += H_HERO
 
     if cells:
         y += H_RULE_GAP_TOP
@@ -187,90 +209,151 @@ def render_session_pixmap(s, cfg: dict, width: int = 344,
 
     y += H_FOOT_GAP
     _draw_footer(painter, family, x, y, w,
-                 [(first_keyboard_label(cfg.get("expand_hotkeys") or []), "graph"),
-                  (first_keyboard_label(cfg.get("cycle_hotkeys") or []), "playlist")],
-                 # Only label the pair format when some stat actually splits;
-                 # otherwise every value is a bare number and the note is noise.
+                 [(first_keyboard_label(cfg.get("expand_hotkeys") or []), "MMR graph")],
                  note="session / yours" if cells and session_has_split(s) else "")
     painter.end()
     return pix
 
 
-# --- post-match summary -----------------------------------------------------
-def render_summary_pixmap(payload: dict, ms, cfg: dict, width: int = 344,
-                          dpr: float = 1.0) -> QPixmap:
-    """Result card flashed when a match ends. Outcome and score lead; the
-    per-match stats reuse the same grid as the expanded H2H card."""
+def render_summary_pixmap(payload: dict, ms, cfg: dict,
+                          players_db: Optional[dict] = None,
+                          mmr_before: Optional[int] = None,
+                          mmr_after: Optional[int] = None,
+                          width: int = 344, dpr: float = 1.0) -> QPixmap:
+    """Result card. Outcome and score lead; the footer names the opponent you
+    just played and what the match did to your MMR."""
     family = cfg.get("font_family", "Segoe UI")
     cells = match_stat_cells(ms)
-    height = (H_HERO + (H_RULE_GAP_TOP + 1 + H_RULE_GAP_BOT if cells else 0)
-              + math.ceil(len(cells) / 2) * H_GRID_ROW + 6)
+    my_team, winner = payload.get("myTeam"), payload.get("winner")
+    won = winner == my_team
+    accent = glass.WIN if won else glass.LOSS
+
+    opponent = _summary_opponent(payload, players_db)
+    # The post-match MMR poll lands minutes after this card flashes, so before
+    # and after are usually the same number. Showing "1095 -> 1095" would imply
+    # the match moved nothing; the line simply waits until it has something.
+    show_mmr = (isinstance(mmr_before, int) and isinstance(mmr_after, int)
+                and mmr_before != mmr_after)
+    has_foot = bool(opponent or show_mmr)
+    height = (H_SUM_HERO
+              + (H_RULE_GAP_TOP + 1 + H_RULE_GAP_BOT if cells else 0)
+              + math.ceil(len(cells) / 2) * H_GRID_ROW
+              + (H_FOOT_GAP + 1 + H_FOOT_RULE_GAP + H_FOOT if has_foot else 6))
     pix = glass.new_canvas(width, height, dpr)
     painter = QPainter(pix)
     painter.setRenderHint(QPainter.Antialiasing, True)
     painter.setRenderHint(QPainter.TextAntialiasing, True)
     x, w, y = 0, width, 0
 
-    my_team, winner = payload.get("myTeam"), payload.get("winner")
-    won = winner == my_team
-    accent = glass.WIN if won else glass.LOSS
-    painter.setFont(glass.font(family, 15, bold=True, letter_spacing=0.16))
+    painter.setFont(glass.font(family, 19, bold=True, letter_spacing=0.06))
     painter.setPen(QPen(glass.qc(accent)))
-    painter.drawText(x, 26, "WIN" if won else "LOSS")
+    painter.drawText(x, y + 22, "WIN" if won else "LOSS")
+    sub = " · ".join(p for p in (pretty_arena(payload.get("arena") or ""),
+                                 payload.get("playlist") or "") if p)
+    if sub:
+        painter.setFont(glass.font(family, 8))
+        painter.setPen(QPen(glass.qc(glass.TEXT, glass.A_MUTED)))
+        painter.drawText(x, y + 38, sub)
 
     score = payload.get("score")
     if isinstance(score, list) and len(score) == 2 and isinstance(my_team, int):
         mine, theirs = str(score[my_team]), str(score[1 - my_team])
-        # Measure each run with the font it will actually be drawn in — the
-        # separator is a smaller face, and assuming its width clipped the score.
-        painter.setFont(glass.mono(16, bold=True))
-        fm = painter.fontMetrics()
-        painter.setFont(glass.mono(12))
+        painter.setFont(glass.mono(24, bold=True))
+        fmb = painter.fontMetrics()
+        painter.setFont(glass.mono(14))
         dash_w = painter.fontMetrics().horizontalAdvance("–")
-        total = (fm.horizontalAdvance(mine) + 6 + dash_w + 6
-                 + fm.horizontalAdvance(theirs))
+        total = fmb.horizontalAdvance(mine) + 6 + dash_w + 6 + fmb.horizontalAdvance(theirs)
         cx = x + w - total - RIGHT_INSET
-        painter.setFont(glass.mono(16, bold=True))
+        painter.setFont(glass.mono(24, bold=True))
         painter.setPen(QPen(glass.qc(glass.TEXT)))
-        painter.drawText(cx, 26, mine)
-        cx += fm.horizontalAdvance(mine) + 6
-        painter.setFont(glass.mono(12))
-        painter.setPen(QPen(glass.qc(glass.TEXT, glass.A_GHOST)))
-        painter.drawText(cx, 26, "–")
-        cx += painter.fontMetrics().horizontalAdvance("–") + 6
-        painter.setFont(glass.mono(16, bold=True))
-        painter.setPen(QPen(glass.qc(glass.TEXT)))
-        painter.drawText(cx, 26, theirs)
-    y += H_HERO
+        painter.drawText(int(cx), y + 26, mine)
+        cx += fmb.horizontalAdvance(mine) + 6
+        painter.setFont(glass.mono(14))
+        painter.setPen(QPen(glass.qc(glass.TEXT, 0.28)))
+        painter.drawText(int(cx), y + 26, "–")
+        cx += dash_w + 6
+        painter.setFont(glass.mono(24, bold=True))
+        painter.setPen(QPen(glass.qc(glass.TEXT, 0.55)))
+        painter.drawText(int(cx), y + 26, theirs)
+    y += H_SUM_HERO
 
     if cells:
-        y += H_RULE_GAP_TOP - 8
-        glass.rule(painter, x, y, w)
+        y += H_RULE_GAP_TOP
+        glass.rule(painter, x, y, w, 0.10)
         y += 1 + H_RULE_GAP_BOT
         draw_stat_grid(painter, family, x, y, w, cells)
+        y += math.ceil(len(cells) / 2) * H_GRID_ROW
+
+    if has_foot:
+        y += H_FOOT_GAP
+        glass.rule(painter, x, y, w, 0.08)
+        base = y + H_FOOT_RULE_GAP + 8
+        if opponent:
+            name, rec = opponent
+            painter.setFont(glass.font(family, 8))
+            painter.setPen(QPen(glass.qc(glass.TEXT, glass.A_MUTED)))
+            label = f"vs {name}"
+            painter.drawText(x, base, label)
+            cx = x + painter.fontMetrics().horizontalAdvance(label) + 8
+            if rec:
+                painter.setFont(glass.mono(8, bold=True))
+                painter.setPen(QPen(glass.qc(glass.WIN)))
+                painter.drawText(int(cx), base, str(rec[0]))
+                cx += painter.fontMetrics().horizontalAdvance(str(rec[0]))
+                painter.setPen(QPen(glass.qc(glass.TEXT, 0.28)))
+                painter.drawText(int(cx), base, "/")
+                cx += painter.fontMetrics().horizontalAdvance("/")
+                painter.setPen(QPen(glass.qc(glass.LOSS)))
+                painter.drawText(int(cx), base, str(rec[1]))
+        if show_mmr:
+            painter.setFont(glass.font(family, 7))
+            text = f"{mmr_before} → {mmr_after}"
+            tw = painter.fontMetrics().horizontalAdvance(text)
+            painter.setPen(QPen(glass.qc(glass.TEXT, glass.A_GHOST)))
+            painter.drawText(int(x + w - tw - RIGHT_INSET), base, text)
     painter.end()
     return pix
 
 
-# --- settings menu ----------------------------------------------------------
-def _binding_label(name: Optional[str]) -> str:
-    if not name:
-        return "—"
-    if name.startswith("pad_"):
-        return name[4:].upper().replace("_", " ")
-    return name.upper()
+def _summary_opponent(payload: dict, players_db: Optional[dict]):
+    """The opponent worth naming: the one you have the longest history with."""
+    my_team = payload.get("myTeam")
+    best = None
+    for p in payload.get("players") or []:
+        if p.get("team") == my_team:
+            continue
+        rec = (players_db or {}).get(p.get("key")) or {}
+        b = rec.get(BUCKET_VS) or {}
+        played = int(b.get("wins", 0)) + int(b.get("losses", 0))
+        cand = (played, p.get("name", "?"),
+                (int(b.get("wins", 0)), int(b.get("losses", 0))) if played else None)
+        if best is None or cand[0] > best[0]:
+            best = cand
+    if best is None:
+        return None
+    return (best[1], best[2])
+
+
+def _draw_switch(painter: QPainter, x: float, cy: float, on: bool) -> None:
+    """34x18 track with a knob — reads as a control, unlike an ON/OFF word."""
+    track = glass.qc(glass.WIN, 0.90) if on else glass.qc(glass.WHITE, 0.12)
+    painter.setPen(Qt.NoPen)
+    painter.setBrush(QBrush(track))
+    painter.drawRoundedRect(QRectF(x, cy - 9, 34, 18), 9, 9)
+    knob = glass.qc(glass.PILL_TEXT_ON_WIN) if on else glass.qc(glass.TEXT, 0.55)
+    painter.setBrush(QBrush(knob))
+    painter.drawEllipse(QRectF(x + (18 if on else 2), cy - 7, 14, 14))
 
 
 def render_menu_pixmap(rows: list[dict], selected_index: int, capturing: bool,
-                       cfg: dict, menu_key: str = "f5", width: int = 344,
-                       dpr: float = 1.0) -> QPixmap:
-    """In-game settings menu. Input-transparent overlay, so this is a static
-    panel: the selected row is a filled pill rather than a text cursor."""
+                       cfg: dict, menu_key: str = "f5", status: str = "",
+                       width: int = 344, dpr: float = 1.0) -> QPixmap:
+    """Settings menu. Input-transparent overlay, so this is a static panel:
+    selection is a tinted row with an accent bar, not a text cursor."""
     family = cfg.get("font_family", "Segoe UI")
     body = 0
     for row in rows:
-        body += H_SECTION if row["type"] == "header" else (
-            6 if row["type"] == "spacer" else H_MENU_ROW)
+        body += {"header": H_SECTION, "spacer": 6}.get(row["type"], H_MENU_ROW)
     height = (H_HEADER + H_RULE_GAP_TOP + 1 + H_RULE_GAP_BOT + body
               + H_FOOT_GAP + 1 + H_FOOT_RULE_GAP + H_FOOT)
     pix = glass.new_canvas(width, height, dpr)
@@ -279,8 +362,7 @@ def render_menu_pixmap(rows: list[dict], selected_index: int, capturing: bool,
     painter.setRenderHint(QPainter.TextAntialiasing, True)
     x, w, y = 0, width, 0
 
-    _draw_header(painter, family, x, w, "SETTINGS",
-                 "CAPTURING" if capturing else "", glass.ACCENT if capturing else None)
+    _draw_header(painter, family, x, w, "SETTINGS", status)
     y += H_HEADER + H_RULE_GAP_TOP
     glass.rule(painter, x, y, w)
     y += 1 + H_RULE_GAP_BOT
@@ -291,51 +373,81 @@ def render_menu_pixmap(rows: list[dict], selected_index: int, capturing: bool,
             y += 6
             continue
         if rtype == "header":
-            glass.section_label(painter, family, x, y + 15, row["label"])
+            painter.setFont(glass.font(family, 7, bold=True, letter_spacing=0.18))
+            painter.setPen(QPen(glass.qc(glass.TEXT, glass.A_MUTED)))
+            painter.drawText(x, y + 14, row["label"])
             y += H_SECTION
             continue
 
         selected = i == selected_index
-        if selected:
-            painter.setPen(QPen(glass.qc(glass.ACCENT, 0.22)))
+        capturing_here = capturing and selected and rtype == "binding"
+        rect = QRectF(x + 0.5, y + 0.5, w - 1, H_MENU_ROW - 4)
+        if capturing_here:
+            pen = QPen(glass.qc(glass.ACCENT, 0.40))
+            pen.setStyle(Qt.DashLine)
+            painter.setPen(pen)
+            painter.setBrush(QBrush(glass.qc(glass.WHITE, 0.06)))
+            painter.drawRoundedRect(rect, glass.ROW_RADIUS, glass.ROW_RADIUS)
+        elif selected:
+            painter.setPen(QPen(glass.qc(glass.ACCENT, 0.26)))
             painter.setBrush(QBrush(glass.qc(glass.ACCENT, 0.10)))
-            painter.drawRoundedRect(QRectF(x + 0.5, y + 0.5, w - 1, H_MENU_ROW - 3),
-                                    glass.ROW_RADIUS, glass.ROW_RADIUS)
+            painter.drawRoundedRect(rect, glass.ROW_RADIUS, glass.ROW_RADIUS)
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QBrush(glass.qc(glass.ACCENT)))
+            painter.drawRoundedRect(QRectF(x + 8, y + 5, 3, 14), 2, 2)
+        elif rtype == "toggle":
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QBrush(glass.qc(glass.WHITE, 0.04)))
+            painter.drawRoundedRect(rect, glass.ROW_RADIUS, glass.ROW_RADIUS)
+
         baseline = y + 17
-        painter.setFont(glass.font(family, 9, bold=selected))
-        painter.setPen(QPen(glass.qc(glass.TEXT, 1.0 if selected else glass.A_SECONDARY)))
-        painter.drawText(x + 10, baseline, row["label"])
+        label_x = x + (17 if selected and not capturing_here else 11)
+        painter.setFont(glass.font(family, 9))
+        painter.setPen(QPen(glass.qc(glass.TEXT,
+                                     1.0 if (selected or capturing_here) else glass.A_SECONDARY)))
+        painter.drawText(label_x, baseline, row["label"])
 
         if rtype == "toggle":
-            on = bool(row["value"])
-            text = "ON" if on else "OFF"
-            tone = glass.WIN if on else glass.TEXT
-            painter.setFont(glass.mono(7, bold=True))
-            tw = painter.fontMetrics().horizontalAdvance(text) + 16
-            glass.chip(painter, x + w - tw - 10 - RIGHT_INSET, baseline, text,
-                       glass.mono(7, bold=True),
-                       glass.qc(tone, 1.0 if on else glass.A_MUTED),
-                       fill=glass.qc(tone, 0.14 if on else 0.06),
-                       border=glass.qc(tone, 0.24 if on else glass.A_CHIP_LINE),
-                       radius=glass.PILL_RADIUS, pad_x=8)
-        elif rtype == "binding":
-            kb = "press…" if (capturing and selected) else _binding_label(row.get("kb"))
-            pad = "press…" if (capturing and selected) else _binding_label(row.get("pad"))
-            cx = x + w - 10 - RIGHT_INSET
-            for label in (pad, kb):
+            _draw_switch(painter, x + w - 34 - 11 - RIGHT_INSET, y + 11, bool(row["value"]))
+        elif capturing_here:
+            painter.setFont(glass.font(family, 8))
+            painter.setPen(QPen(glass.qc(glass.ACCENT)))
+            msg = "press a key or button…"
+            mw = painter.fontMetrics().horizontalAdvance(msg)
+            painter.drawText(int(x + w - mw - 11 - RIGHT_INSET), baseline, msg)
+        else:
+            cx = x + w - 11 - RIGHT_INSET
+            for label in (_binding_label(row.get("pad")), _binding_label(row.get("kb"))):
+                if label == "—":
+                    painter.setFont(glass.font(family, 8))
+                    lw = painter.fontMetrics().horizontalAdvance(label)
+                    cx -= lw
+                    painter.setPen(QPen(glass.qc(glass.TEXT, 0.26)))
+                    painter.drawText(int(cx), baseline, label)
+                    cx -= 6
+                    continue
                 painter.setFont(glass.mono(7, bold=True))
-                lw = painter.fontMetrics().horizontalAdvance(label) + 10
+                lw = painter.fontMetrics().horizontalAdvance(label) + 12
                 cx -= lw
                 glass.chip(painter, cx, baseline, label, glass.mono(7, bold=True),
-                           glass.qc(glass.TEXT, 0.85 if selected else glass.A_MUTED),
+                           glass.qc(glass.TEXT, 0.8),
                            fill=glass.qc(glass.WHITE, glass.A_CHIP_FILL),
                            border=glass.qc(glass.WHITE, glass.A_CHIP_LINE),
-                           radius=glass.CHIP_RADIUS, pad_x=5)
+                           radius=glass.CHIP_RADIUS, pad_x=6)
                 cx -= 6
         y += H_MENU_ROW
 
     y += H_FOOT_GAP
-    _draw_footer(painter, family, x, y, w,
-                 [(menu_key.upper(), "close"), ("↑↓", "move"), ("ENTER", "change")])
+    glass.rule(painter, x, y, w, glass.A_ROW_LINE)
+    base = y + H_FOOT_RULE_GAP + 8
+    painter.setFont(glass.font(family, 8))
+    painter.setPen(QPen(glass.qc(glass.TEXT, glass.A_MUTED)))
+    cx = x
+    for hint in ("↑↓ move", "Enter select", "Esc cancel"):
+        painter.drawText(int(cx), base, hint)
+        cx += painter.fontMetrics().horizontalAdvance(hint) + 14
+    close = f"{menu_key.upper()} close"
+    cw = painter.fontMetrics().horizontalAdvance(close)
+    painter.drawText(int(x + w - cw - RIGHT_INSET), base, close)
     painter.end()
     return pix
