@@ -153,8 +153,8 @@ def _draw_form(painter: QPainter, family: str, right: float, baseline: float,
 
 def _draw_hero(painter: QPainter, family: str, x: int, w: int, y: int,
                name: str, my_mmr: Optional[int], bits, delta: Optional[int],
-               next_rank, playlist: str, spark: list[int], recent: list,
-               swatch: str, session, mmr_enabled: bool) -> None:
+               next_rank, playlist: str, category: str, spark: list[int],
+               recent: list, swatch: str, session, mmr_enabled: bool) -> None:
     """Your row: identity, the number, and where it's heading."""
     right = x + w - RIGHT_INSET
 
@@ -221,8 +221,14 @@ def _draw_hero(painter: QPainter, family: str, x: int, w: int, y: int,
         painter.setPen(QPen(QColor(hexc)))
         painter.drawText(cx, parts_y, tier)
         cx += painter.fontMetrics().horizontalAdvance(tier) + 8
+    # The cycle key walks best / 1v1 / 2v2 / 3v3 / peak, so the card has to say
+    # which one it is showing. For best and peak that is not the same thing as
+    # the playlist the number came from, so both appear.
+    scope = category.upper()
+    if category in ("best", "peak") and playlist:
+        scope = f"{scope} · {playlist.upper()}"
     for text, fnt, alpha in (
-        (playlist.upper(), glass.font(family, 7, bold=True, letter_spacing=0.10), 0.5),
+        (scope, glass.font(family, 7, bold=True, letter_spacing=0.10), 0.62),
         (f"{next_rank[0]} to {next_rank[1]}" if next_rank else "",
          glass.font(family, 8), glass.A_FAINT),
     ):
@@ -394,7 +400,8 @@ def render_h2h_pixmap(roster: list[dict], my_team: int, arena: str,
 
     _draw_hero(painter, family, x, w, y, self_name, my_mmr,
                mmr_bits(self_entry, mmr_category) if mmr_enabled else None,
-               delta, hero_data.next_rank_distance(my_mmr), playlist, spark,
+               delta, hero_data.next_rank_distance(my_mmr), playlist,
+               mmr_category, spark,
                list(session.recent) if session else [], swatch_for(my_team),
                session, mmr_enabled)
     y += H_HERO if mmr_enabled else H_HERO_NO_MMR
@@ -433,7 +440,7 @@ def render_h2h_pixmap(roster: list[dict], my_team: int, arena: str,
     is_expanded = bool(match_stats is not None) if expanded is None else expanded
     for keys_cfg, verb in ((cfg.get("expand_hotkeys"),
                             "hide stats" if is_expanded else "match stats"),
-                           (cfg.get("cycle_hotkeys"), playlist or "cycle MMR")):
+                           (cfg.get("cycle_hotkeys"), mmr_category if mmr_enabled else "cycle MMR")):
         label = first_keyboard_label(keys_cfg or [])
         if not label:
             continue

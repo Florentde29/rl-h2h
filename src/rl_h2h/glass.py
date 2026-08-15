@@ -26,7 +26,8 @@ LOSS = (255, 124, 138)          # red — losses, offline, negative deltas
 CHAMPION = (196, 181, 253)      # violet — champion-tier rank text
 GOLD = (240, 198, 116)          # gold-tier rank text
 WHITE = (255, 255, 255)
-CARD_BASE = (15, 17, 23)        # card fill before the white glass gradient
+CARD_BASE = (12, 14, 19)        # card fill before the white glass gradient
+CARD_ALPHA = 224                # 0-255; higher = less game showing through
 PILL_TEXT_ON_WIN = (13, 26, 20)  # dark text on a saturated green pill
 PILL_TEXT_ON_LOSS = (26, 6, 6)
 
@@ -177,13 +178,16 @@ def card_stylesheet(text_rgb: tuple[int, int, int] = TEXT,
     """
     # `tint` colours the first stop and the border — used by the match summary,
     # where the card itself should read as the result before any text is.
-    stops = ((0.0, 0.11), (0.55, 0.03), (1.0, 0.06))
+    # Darker than the mockup's values: judged in a browser the sheen reads as
+    # depth, but over a bright game it lifts the whole card and costs text
+    # contrast. Less white in the gradient, more opacity behind it.
+    stops = ((0.0, 0.075), (0.55, 0.02), (1.0, 0.04))
     parts = []
     for i, (pos, white_amount) in enumerate(stops):
         over = tint if (tint and i == 0) else WHITE
-        amount = 0.14 if (tint and i == 0) else white_amount
+        amount = 0.11 if (tint and i == 0) else white_amount
         r, g, b = _blend(CARD_BASE, over, amount)
-        parts.append(f"stop:{pos} rgba({r},{g},{b},199)")
+        parts.append(f"stop:{pos} rgba({r},{g},{b},{CARD_ALPHA})")
     gradient = f"qlineargradient(x1:0, y1:0, x2:1, y2:1, {', '.join(parts)})"
     edge = tint or WHITE
     edge_a = round((0.26 if tint else A_CARD_LINE) * 255)
