@@ -18,7 +18,8 @@ from .hotkey import HotkeyManager, MenuHotkeyListener, capture_next_input, is_rl
 from .mmr import MMR_CATEGORIES, MMRClient, RANKED_PLAYLISTS, append_mmr_history, load_mmr_history
 from .overlay import Overlay
 from .paths import DATA_DIR, MATCHES_PATH, MMR_HISTORY_PATH, MY_MMR_LOG_PATH, PLAYERS_PATH, now_iso
-from .glass_h2h import render_h2h_pixmap, render_idle_pixmap
+from .glass_h2h import render_idle_pixmap
+from .glass_hero import render_h2h_pixmap
 from .glass_screens import (
     render_menu_pixmap,
     render_session_pixmap,
@@ -190,6 +191,11 @@ def main():
             # Expanded H2H adds current-match stats (saves/shots/demos/etc.).
             # Session aggregates live behind the session-hotkey view instead —
             # they aren't actionable mid-match.
+            # The hero block needs the MMR history for its sparkline and
+            # session delta — the same cache the graph view reads, so this
+            # shares its mtime-checked load rather than re-parsing.
+            if mmr_client.is_enabled():
+                _ensure_graph_data_loaded()
             overlay.set_pixmap(render_h2h_pixmap(
                 state["roster"], state["my_team"], state["arena"],
                 players_db, state["team_colors"], cfg,
@@ -199,6 +205,10 @@ def main():
                 mmr_enabled=mmr_client.is_enabled(),
                 match_stats=match_stats if state["h2h_expanded"] else None,
                 expanded=state["h2h_expanded"],
+                session=session,
+                snapshots=mmr_history_cache["snapshots"],
+                matches=mmr_history_cache["matches"],
+                session_started_iso=session.started_at.isoformat(),
                 width=cfg["width"] - glass.CARD_PAD_X * 2,
                 dpr=overlay.devicePixelRatioF(),
             ))
