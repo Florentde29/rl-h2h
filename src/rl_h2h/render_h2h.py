@@ -25,27 +25,6 @@ def first_keyboard_label(keys: list) -> Optional[str]:
     return keys[0]
 
 
-def idle_html(message: str) -> str:
-    is_disconnected = "disconnect" in message.lower() or "stats api" in message.lower()
-    dot_color = "#E5484D" if is_disconnected else colors.C_BLUE
-    label = "OFFLINE" if is_disconnected else "STANDBY"
-    return (
-        "<table width='100%' cellspacing='0' cellpadding='0' style='border-collapse:collapse;'>"
-        "<tr>"
-        f"<td align='left' style='color:{colors.C_TEXT};font-size:10pt;font-weight:700;"
-        "letter-spacing:0.18em;'>HEAD&middot;TO&middot;HEAD</td>"
-        "<td align='right' style='font-size:8pt;font-weight:700;letter-spacing:0.16em;'>"
-        f"<span style='color:{dot_color};'>&#9679;</span>"
-        f"&nbsp;<span style='color:#7A8290;'>{label}</span>"
-        "</td>"
-        "</tr>"
-        "</table>"
-        "<div style='height:10px;font-size:1px;line-height:1px;'>&nbsp;</div>"
-        f"<div style='color:{colors.C_DIM};font-size:10pt;letter-spacing:0.01em;line-height:140%;'>"
-        f"{message}</div>"
-    )
-
-
 def humanize_when(iso_ts: Optional[str]) -> str:
     t = parse_iso(iso_ts)
     if t is None:

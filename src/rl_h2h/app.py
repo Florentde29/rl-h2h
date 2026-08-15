@@ -18,8 +18,8 @@ from .hotkey import HotkeyManager, MenuHotkeyListener, capture_next_input, is_rl
 from .mmr import MMR_CATEGORIES, MMRClient, RANKED_PLAYLISTS, append_mmr_history, load_mmr_history
 from .overlay import Overlay
 from .paths import DATA_DIR, MATCHES_PATH, MMR_HISTORY_PATH, MY_MMR_LOG_PATH, PLAYERS_PATH, now_iso
-from .glass_h2h import render_h2h_pixmap
-from .render_h2h import idle_html, render_menu_html, session_footer_html
+from .glass_h2h import render_h2h_pixmap, render_idle_pixmap
+from .render_h2h import render_menu_html, session_footer_html
 from .render_summary import render_summary_html
 from .session_stats import MatchStats, SessionStats, render_session_html
 from .stats_client import StatsClient
@@ -40,10 +40,10 @@ from .graph import render_graph_pixmap
 # The full diagnosis — file paths and the exact cause — goes to stderr and the
 # tray balloon instead; it's far too long for a status line.
 STATS_API_DISABLED = "Stats API disabled in Rocket League"
-# Overlay variant: idle_html renders as rich text, so <br> puts the instruction
-# on its own line. The tray tooltip and menu use the bare label above — they're
-# single-line plain text and would show the markup verbatim.
-STATS_API_DISABLED_OVERLAY = f"{STATS_API_DISABLED}<br>see README step 4"
+# Overlay variant: the painted status card takes the fix as parts so the
+# setting renders as a chip. The tray tooltip and menu use the bare label above.
+STATS_API_DISABLED_DETAIL = [("text", "Set"), ("code", "PacketSendRate=2"),
+                             ("text", "— README step 4")]
 
 
 def main():
@@ -78,11 +78,11 @@ def main():
     if ini_problem:
         print(f"[statsapi] {ini_problem}", file=sys.stderr)
 
-    startup_message = (STATS_API_DISABLED_OVERLAY if ini_problem
-                       else "Waiting for Rocket League…")
+    startup_status = ((STATS_API_DISABLED, STATS_API_DISABLED_DETAIL, True)
+                      if ini_problem
+                      else ("Waiting for Rocket League…", None, False))
 
     overlay = Overlay(cfg)
-    overlay.set_html(idle_html(startup_message))
     stats = StatsClient(cfg["host"], cfg["port"],
                         api_dump_enabled=bool(cfg.get("api_debug_dump", False)))
     session = SessionStats(recent_size=cfg.get("recent_size", 5))
@@ -115,7 +115,8 @@ def main():
         "session_held": False,
         "summary_visible": False,
         "summary_html": "",
-        "h2h_html": idle_html(startup_message),
+        # (title, detail parts, offline) for the painted status card.
+        "h2h_status": startup_status,
         "mmr_db": {},
         "self_id": None,
         "h2h_expanded": bool(cfg.get("h2h_default_expanded", False)),
@@ -196,12 +197,17 @@ def main():
                 dpr=overlay.devicePixelRatioF(),
             ))
         elif state["h2h_held"] and not state["stats_connected"]:
-            # Held while the feed is down: explain why, since h2h_html holds the
+            # Held while the feed is down: explain why, since h2h_status holds the
             # reason and used to be rendered only in the in_match branch above —
             # unreachable exactly when disconnected, which is what made the key
             # look dead. Deliberately NOT shown while connected: "waiting for a
             # match" is normal, and a panel on every menu press is just noise.
-            overlay.set_html(state["h2h_html"])
+            title, detail, offline = state["h2h_status"]
+            overlay.set_pixmap(render_idle_pixmap(
+                cfg, title, detail=detail, offline=offline,
+                width=cfg["width"] - glass.CARD_PAD_X * 2,
+                dpr=overlay.devicePixelRatioF(),
+            ))
         elif state["summary_visible"]:
             overlay.set_html(state["summary_html"])
         else:
@@ -274,7 +280,7 @@ def main():
             mmr_log(f"rerender_h2h: cat={cfg.get('mmr_category','best')!r} "
                     f"rows=[{', '.join(summary_parts)}]")
         # The card is painted at draw time now, so this only has to publish a
-        # consistent MMR snapshot for the painter to read. h2h_html is left to
+        # consistent MMR snapshot for the painter to read. h2h_status is left to
         # the status messages (waiting / disconnected / Stats API disabled).
         state["mmr_db"] = mmr_db
         state["self_id"] = self_id
@@ -438,7 +444,7 @@ def main():
     def on_destroyed():
         state["in_match"] = False
         hide_summary()  # leaving the match → drop the post-match popup
-        state["h2h_html"] = idle_html("Waiting for next match…")
+        state["h2h_status"] = ("Waiting for next match…", None, False)
         update_overlay()
 
     def on_status(connected: bool):
@@ -448,13 +454,14 @@ def main():
         if state["in_match"]:
             return
         if connected:
-            state["h2h_html"] = idle_html("Connected — waiting for match…")
+            state["h2h_status"] = ("Connected — waiting for match…", None, False)
         else:
             # Name the cause when we know it — a generic "is it enabled?" is
             # unhelpful once we've read the .ini and found it switched off.
-            state["h2h_html"] = idle_html(
-                STATS_API_DISABLED_OVERLAY if ini_problem
-                else "Disconnected — is RL running with the Stats API enabled?")
+            state["h2h_status"] = (
+                (STATS_API_DISABLED, STATS_API_DISABLED_DETAIL, True) if ini_problem
+                else ("Disconnected — is RL running with the Stats API enabled?",
+                      None, True))
         update_overlay()
 
     def on_event_for_session(event: str, data: dict):
@@ -892,7 +899,7 @@ def main():
             # The cached H2H card was rendered against the now-wiped opponent
             # records — refresh so a held Tab during this match doesn't show
             # stale W/L counts. (Idle text until the next match starts.)
-            state["h2h_html"] = idle_html("History wiped — fresh start.")
+            state["h2h_status"] = ("History wiped — fresh start.", None, False)
             print("[reset] match history wiped", file=sys.stderr)
             update_overlay()
         wipe_history_action.triggered.connect(_wipe_history)

@@ -191,7 +191,11 @@ def _draw_player_row(painter: QPainter, family: str, x: int, y: int, w: int,
     line = glass.qc(glass.WIN, 0.20) if is_self else glass.qc(glass.WHITE, glass.A_ROW_LINE)
     painter.setPen(QPen(line))
     painter.setBrush(QBrush(fill))
-    painter.drawRoundedRect(QRectF(x, y, w, row_h), glass.ROW_RADIUS, glass.ROW_RADIUS)
+    # Half-pixel inset: a 1px stroke is centred on the path, so a rect drawn on
+    # the canvas bounds loses half its border off-image and the right edge ends
+    # up dimmer than the left.
+    painter.drawRoundedRect(QRectF(x + 0.5, y + 0.5, w - 1, row_h - 1),
+                            glass.ROW_RADIUS, glass.ROW_RADIUS)
 
     # A slim row has no second line, so the name centres instead of sitting high.
     slim = row_h <= H_ROW_SLIM
@@ -352,6 +356,79 @@ def _draw_footer(painter: QPainter, family: str, x: int, y: int, w: int,
         painter.drawText(x + w - nw - RIGHT_INSET, baseline, note)
 
 
+def render_idle_pixmap(cfg: dict, title: str,
+                       detail: Optional[list[tuple[str, str]]] = None,
+                       offline: bool = False,
+                       width: int = 344, dpr: float = 1.0) -> QPixmap:
+    """Status card shown when there's no match to display.
+
+    `detail` is a list of (kind, text) where kind is "text" or "code"; the code
+    parts render as chips. That keeps the caller from embedding markup in a
+    string the painter would have to parse back out."""
+    family = cfg.get("font_family", "Segoe UI")
+    detail = detail or []
+    height = H_HEADER + H_RULE_GAP_TOP + 1 + H_RULE_GAP_BOT + 20 + (24 if detail else 0)
+    pix = glass.new_canvas(width, height, dpr)
+    painter = QPainter(pix)
+    painter.setRenderHint(QPainter.Antialiasing, True)
+    painter.setRenderHint(QPainter.TextAntialiasing, True)
+    x, w, y = 0, width, 0
+
+    painter.setFont(glass.font(family, 10, bold=True, letter_spacing=0.14))
+    painter.setPen(QPen(glass.qc(glass.TEXT)))
+    painter.drawText(x, y + 15, "HEAD TO HEAD")
+
+    # Status pill, tinted by state: red when the feed is down, neutral when
+    # we're simply between matches.
+    tone = glass.LOSS if offline else glass.TEXT
+    label = "OFFLINE" if offline else "STANDBY"
+    f = glass.font(family, 6, bold=True, letter_spacing=0.14)
+    painter.setFont(f)
+    pill_w = painter.fontMetrics().horizontalAdvance(label) + 28
+    px = x + w - pill_w - RIGHT_INSET
+    painter.setPen(QPen(glass.qc(tone, 0.26 if offline else glass.A_CHIP_LINE)))
+    painter.setBrush(QBrush(glass.qc(tone, 0.12 if offline else 0.07)))
+    painter.drawRoundedRect(QRectF(px, y + 1, pill_w, 18), 9, 9)
+    painter.setPen(Qt.NoPen)
+    painter.setBrush(QBrush(glass.qc(tone, 1.0 if offline else 0.5)))
+    painter.drawEllipse(QRectF(px + 9, y + 7, 5, 5))
+    painter.setPen(QPen(glass.qc(tone, 1.0 if offline else glass.A_LABEL)))
+    painter.drawText(int(px + 19), y + 14, label)
+
+    y += H_HEADER + H_RULE_GAP_TOP
+    painter.setPen(QPen(glass.qc(glass.WHITE, glass.A_DIVIDER)))
+    painter.drawLine(x, y, x + w, y)
+    y += 1 + H_RULE_GAP_BOT
+
+    # Elide against the measured width: the longest status string already runs
+    # close to the edge, and a wider font face on another machine would clip it.
+    painter.setFont(glass.font(family, 10))
+    painter.setPen(QPen(glass.qc(glass.TEXT)))
+    fm = painter.fontMetrics()
+    shown = title
+    while shown and fm.horizontalAdvance(shown) > w - RIGHT_INSET and len(shown) > 3:
+        shown = shown[:-2] + "…"
+    painter.drawText(x, y + 13, shown)
+
+    if detail:
+        y += 24
+        dx = x
+        for kind, text in detail:
+            if kind == "code":
+                dx = _chip(painter, dx, y + 12, text, glass.mono(7, bold=True),
+                           glass.qc(glass.ACCENT),
+                           fill=glass.qc(glass.ACCENT, 0.10),
+                           border=glass.qc(glass.ACCENT, 0.20),
+                           radius=glass.CHIP_RADIUS, pad_x=6) + 7
+            else:
+                painter.setFont(glass.font(family, 8))
+                painter.setPen(QPen(glass.qc(glass.TEXT, glass.A_LABEL)))
+                painter.drawText(int(dx), y + 12, text)
+                dx += painter.fontMetrics().horizontalAdvance(text) + 7
+    painter.end()
+    return pix
+
+
 def render_h2h_pixmap(roster: list[dict], my_team: int, arena: str,
                       players_db: dict, team_colors: dict, cfg: dict,
                       self_id: Optional[str] = None,
@@ -409,7 +486,7 @@ def render_h2h_pixmap(roster: list[dict], my_team: int, arena: str,
         painter.setFont(f_cat)
         cw = painter.fontMetrics().horizontalAdvance(cat)
         pill_w = lw + cw + 6 + 16
-        px = x + w - pill_w
+        px = x + w - pill_w - RIGHT_INSET
         painter.setPen(QPen(glass.qc(glass.WHITE, 0.10)))
         painter.setBrush(QBrush(glass.qc(glass.WHITE, 0.09)))
         painter.drawRoundedRect(QRectF(px, y + 1, pill_w, 18), 9, 9)
