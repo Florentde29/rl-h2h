@@ -18,8 +18,9 @@ from .hotkey import HotkeyManager, MenuHotkeyListener, capture_next_input, is_rl
 from .mmr import MMR_CATEGORIES, MMRClient, RANKED_PLAYLISTS, append_mmr_history, load_mmr_history
 from .overlay import Overlay
 from .paths import DATA_DIR, MATCHES_PATH, MMR_HISTORY_PATH, MY_MMR_LOG_PATH, PLAYERS_PATH, now_iso
-from .render_h2h import h2h_footer_html, idle_html, render_html, render_menu_html, session_footer_html
-from .render_summary import render_match_stats_html, render_summary_html
+from .glass_h2h import render_h2h_pixmap
+from .render_h2h import idle_html, render_menu_html, session_footer_html
+from .render_summary import render_summary_html
 from .session_stats import MatchStats, SessionStats, render_session_html
 from .stats_client import StatsClient
 from .storage import (
@@ -115,6 +116,8 @@ def main():
         "summary_visible": False,
         "summary_html": "",
         "h2h_html": idle_html(startup_message),
+        "mmr_db": {},
+        "self_id": None,
         "h2h_expanded": bool(cfg.get("h2h_default_expanded", False)),
         "session_view": cfg.get("session_view", "session"),
         "graph_playlist": cfg.get("graph_playlist", "2v2"),
@@ -177,26 +180,21 @@ def main():
                     + session_footer_html(cfg, "session")
                 )
         elif state["h2h_held"] and state["in_match"]:
-            if state["h2h_expanded"]:
-                # Expanded H2H shows current-match stats (saves/shots/demos/etc.).
-                # Session aggregates live behind the session-hotkey view instead —
-                # they aren't actionable mid-match.
-                match_body = render_match_stats_html(match_stats)
-                spacer = (
-                    "<table cellpadding='0' cellspacing='0' width='100%'>"
-                    "<tr><td height='28'>&nbsp;</td></tr></table>"
-                ) if match_body else ""
-                overlay.set_html(
-                    state["h2h_html"]
-                    + spacer
-                    + match_body
-                    + h2h_footer_html(cfg, expanded=True, session=None)
-                )
-            else:
-                overlay.set_html(
-                    state["h2h_html"]
-                    + h2h_footer_html(cfg, expanded=False, session=None)
-                )
+            # Expanded H2H adds current-match stats (saves/shots/demos/etc.).
+            # Session aggregates live behind the session-hotkey view instead —
+            # they aren't actionable mid-match.
+            overlay.set_pixmap(render_h2h_pixmap(
+                state["roster"], state["my_team"], state["arena"],
+                players_db, state["team_colors"], cfg,
+                self_id=state.get("self_id") or cfg.get("self_player_id"),
+                mmr_db=state.get("mmr_db"),
+                mmr_category=cfg.get("mmr_category", "best"),
+                mmr_enabled=mmr_client.is_enabled(),
+                match_stats=match_stats if state["h2h_expanded"] else None,
+                expanded=state["h2h_expanded"],
+                width=cfg["width"] - glass.CARD_PAD_X * 2,
+                dpr=overlay.devicePixelRatioF(),
+            ))
         elif state["h2h_held"] and not state["stats_connected"]:
             # Held while the feed is down: explain why, since h2h_html holds the
             # reason and used to be rendered only in the in_match branch above —
@@ -275,13 +273,11 @@ def main():
                     )
             mmr_log(f"rerender_h2h: cat={cfg.get('mmr_category','best')!r} "
                     f"rows=[{', '.join(summary_parts)}]")
-        state["h2h_html"] = render_html(
-            state["roster"], state["my_team"], state["arena"],
-            players_db, state["team_colors"], self_id,
-            mmr_db=mmr_db,
-            mmr_category=cfg.get("mmr_category", "best"),
-            mmr_enabled=mmr_client.is_enabled(),
-        )
+        # The card is painted at draw time now, so this only has to publish a
+        # consistent MMR snapshot for the painter to read. h2h_html is left to
+        # the status messages (waiting / disconnected / Stats API disabled).
+        state["mmr_db"] = mmr_db
+        state["self_id"] = self_id
 
     def _ensure_graph_data_loaded() -> None:
         """First call (or after `dirty` is set) parses the on-disk files into
