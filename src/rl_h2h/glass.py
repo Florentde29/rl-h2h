@@ -27,12 +27,15 @@ CARD_BASE = (15, 17, 23)        # card fill before the white glass gradient
 PILL_TEXT_ON_WIN = (13, 26, 20)  # dark text on a saturated green pill
 PILL_TEXT_ON_LOSS = (26, 6, 6)
 
-# Standard alphas, named so the intent survives (design uses these repeatedly).
-A_SECONDARY = 0.62
-A_LABEL = 0.50
-A_MUTED = 0.44
-A_FAINT = 0.34
-A_GHOST = 0.30
+# Text alphas, named so the intent survives (design uses these repeatedly).
+# Raised from the mockup's values: those were judged in a browser on a flat
+# ground, but this card floats over a bright, moving game at 380px wide, where
+# the lower steps washed out. The ramp keeps the same ordering, just lifted.
+A_SECONDARY = 0.72
+A_LABEL = 0.62
+A_MUTED = 0.56
+A_FAINT = 0.46
+A_GHOST = 0.40
 A_DIVIDER = 0.09
 A_ROW_FILL = 0.05
 A_ROW_LINE = 0.07

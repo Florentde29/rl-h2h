@@ -237,9 +237,11 @@ def _draw_plot(painter: QPainter, family: str, left: int, right: int,
 
     painter.restore()
 
-    painter.setFont(glass.mono(6))
-    painter.setPen(QPen(glass.qc(glass.TEXT, glass.A_FAINT)))
-    painter.drawText(left + 9, top + 13, str(y_max))
+    # Axis bounds are read, not decoration — the design's faint treatment made
+    # them hard to pick out against the tier band.
+    painter.setFont(glass.mono(7, bold=True))
+    painter.setPen(QPen(glass.qc(glass.TEXT, 0.66)))
+    painter.drawText(left + 9, top + 14, str(y_max))
     painter.drawText(left + 9, bottom - 6, str(y_min))
 
     tier = _tier_at(points[-1]["mmr"])

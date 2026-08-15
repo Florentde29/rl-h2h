@@ -13,7 +13,7 @@ from typing import Optional
 from PySide6.QtCore import QRectF, Qt
 from PySide6.QtGui import QBrush, QColor, QPainter, QPen, QPixmap
 
-from . import glass
+from . import colors, glass
 from .arenas import pretty_arena
 from .constants import BUCKET_VS, BUCKET_WITH
 from .mmr import tier_color
@@ -264,14 +264,17 @@ def _draw_player_row(painter: QPainter, family: str, x: int, y: int, w: int,
             sx += painter.fontMetrics().horizontalAdvance(bits[0]) + 6
         else:
             tier, hexc, mmr, playlist = bits
-            painter.setFont(glass.font(family, 7, bold=True))
+            painter.setFont(glass.font(family, 8, bold=True))
             painter.setPen(QPen(QColor(hexc)))
             painter.drawText(sx, sub_baseline, tier)
-            sx += painter.fontMetrics().horizontalAdvance(tier) + 6
-            painter.setFont(glass.mono(7, bold=True))
-            painter.setPen(QPen(glass.qc(glass.TEXT, glass.A_SECONDARY)))
+            sx += painter.fontMetrics().horizontalAdvance(tier) + 7
+            # The opponent's MMR is the single most-scanned number on this card,
+            # so it gets full contrast and a size close to the name rather than
+            # the design's muted secondary treatment.
+            painter.setFont(glass.mono(9, bold=True))
+            painter.setPen(QPen(glass.qc(glass.TEXT)))
             painter.drawText(sx, sub_baseline, str(mmr))
-            sx += painter.fontMetrics().horizontalAdvance(str(mmr)) + 6
+            sx += painter.fontMetrics().horizontalAdvance(str(mmr)) + 7
             if playlist and mmr_category == "best":
                 sx = _chip(painter, sx, sub_baseline, str(playlist).upper(),
                            glass.font(family, 6, bold=True, letter_spacing=0.10),
@@ -502,7 +505,10 @@ def render_h2h_pixmap(roster: list[dict], my_team: int, arena: str,
     painter.drawLine(x, y, x + w, y)
     y += 1 + H_RULE_GAP_BOT
 
-    fallback = ("#3B9EFF", "#FF7A29")
+    # Only used when the wire reports no usable ColorPrimary (private and
+    # training matches send gray). Read from the palette rather than hardcoded,
+    # so the team_blue_fallback / team_orange_fallback config keys still apply.
+    fallback = (colors.C_BLUE, colors.C_ORANGE)
     for team in (0, 1):
         rows = team_rows[team]
         swatch = team_colors.get(team) if isinstance(team_colors, dict) else None
