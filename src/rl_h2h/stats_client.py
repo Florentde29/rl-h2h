@@ -282,6 +282,15 @@ class StatsClient(QObject):
                   f"my_team={self._my_team} roster={len(self._roster)}",
                   file=sys.stderr)
             return
+        # A match that never kicked off is not a match. When Rocket League
+        # cancels one — a player fails to connect, the lobby dissolves — it
+        # still reports a WinnerTeamNum, which was being recorded as a real
+        # win against opponents who never played. RoundStarted is the only
+        # signal that a ball was ever put in play.
+        if not self._round_started:
+            print("[stats] MatchEnded before any kickoff — not counted "
+                  "(cancelled match?)", file=sys.stderr)
+            return
         self._ended_emitted = True
         self.match_ended.emit({
             "winner": int(winner),

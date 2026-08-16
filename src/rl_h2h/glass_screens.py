@@ -18,7 +18,7 @@ from PySide6.QtGui import QBrush, QPainter, QPen, QPixmap
 
 from . import glass
 from .arenas import pretty_arena
-from .constants import BUCKET_VS, SF_DEMOLISH, SF_SAVE, SF_SHOT
+from .constants import SF_DEMOLISH, SF_SAVE, SF_SHOT
 from .glass_h2h import (
     H_GRID_ROW, H_HEADER, H_RULE_GAP_BOT, H_RULE_GAP_TOP, RIGHT_INSET,
     draw_stat_grid, match_stat_cells,
@@ -228,13 +228,12 @@ def render_summary_pixmap(payload: dict, ms, cfg: dict,
     won = winner == my_team
     accent = glass.WIN if won else glass.LOSS
 
-    opponent = _summary_opponent(payload, players_db)
     # The post-match MMR poll lands minutes after this card flashes, so before
     # and after are usually the same number. Showing "1095 -> 1095" would imply
     # the match moved nothing; the line simply waits until it has something.
     show_mmr = (isinstance(mmr_before, int) and isinstance(mmr_after, int)
                 and mmr_before != mmr_after)
-    has_foot = bool(opponent or show_mmr)
+    has_foot = bool(show_mmr or cells)
     height = (H_SUM_HERO
               + (H_RULE_GAP_TOP + 1 + H_RULE_GAP_BOT if cells else 0)
               + math.ceil(len(cells) / 2) * H_GRID_ROW
@@ -288,23 +287,12 @@ def render_summary_pixmap(payload: dict, ms, cfg: dict,
         y += H_FOOT_GAP
         glass.rule(painter, x, y, w, 0.08)
         base = y + H_FOOT_RULE_GAP + 8
-        if opponent:
-            name, rec = opponent
-            painter.setFont(glass.font(family, 8))
-            painter.setPen(QPen(glass.qc(glass.TEXT, glass.A_MUTED)))
-            label = f"vs {name}"
-            painter.drawText(x, base, label)
-            cx = x + painter.fontMetrics().horizontalAdvance(label) + 8
-            if rec:
-                painter.setFont(glass.mono(8, bold=True))
-                painter.setPen(QPen(glass.qc(glass.WIN)))
-                painter.drawText(int(cx), base, str(rec[0]))
-                cx += painter.fontMetrics().horizontalAdvance(str(rec[0]))
-                painter.setPen(QPen(glass.qc(glass.TEXT, 0.28)))
-                painter.drawText(int(cx), base, "/")
-                cx += painter.fontMetrics().horizontalAdvance("/")
-                painter.setPen(QPen(glass.qc(glass.LOSS)))
-                painter.drawText(int(cx), base, str(rec[1]))
+        if cells:
+            # "2/1" reads like a scoreline unless the card says otherwise —
+            # it is the match total against your share of it.
+            painter.setFont(glass.font(family, 7))
+            painter.setPen(QPen(glass.qc(glass.TEXT, glass.A_GHOST)))
+            painter.drawText(x, base, "match / yours")
         if show_mmr:
             painter.setFont(glass.font(family, 7))
             text = f"{mmr_before} → {mmr_after}"
@@ -313,25 +301,6 @@ def render_summary_pixmap(payload: dict, ms, cfg: dict,
             painter.drawText(int(x + w - tw - RIGHT_INSET), base, text)
     painter.end()
     return pix
-
-
-def _summary_opponent(payload: dict, players_db: Optional[dict]):
-    """The opponent worth naming: the one you have the longest history with."""
-    my_team = payload.get("myTeam")
-    best = None
-    for p in payload.get("players") or []:
-        if p.get("team") == my_team:
-            continue
-        rec = (players_db or {}).get(p.get("key")) or {}
-        b = rec.get(BUCKET_VS) or {}
-        played = int(b.get("wins", 0)) + int(b.get("losses", 0))
-        cand = (played, p.get("name", "?"),
-                (int(b.get("wins", 0)), int(b.get("losses", 0))) if played else None)
-        if best is None or cand[0] > best[0]:
-            best = cand
-    if best is None:
-        return None
-    return (best[1], best[2])
 
 
 def _draw_switch(painter: QPainter, x: float, cy: float, on: bool) -> None:

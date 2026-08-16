@@ -128,7 +128,10 @@ def _draw_sparkline(painter: QPainter, x: float, y: float,
     painter.setPen(pen)
     painter.setBrush(Qt.NoBrush)
     painter.drawPolyline(QPolygonF(pts))
-    rising = values[-1] >= values[0]
+    # Colour by the LAST step, not the window's overall direction: the form
+    # letters beside it report the last match, and a win inside a losing
+    # session was showing a green W next to a red endpoint.
+    rising = values[-1] >= values[-2]
     painter.setPen(Qt.NoPen)
     painter.setBrush(QBrush(glass.qc(glass.WIN if rising else glass.LOSS)))
     painter.drawEllipse(pts[-1], 3, 3)

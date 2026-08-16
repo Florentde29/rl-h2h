@@ -12,14 +12,14 @@ from PySide6.QtGui import QAction
 from PySide6.QtWidgets import QApplication, QMenu, QMessageBox, QSystemTrayIcon
 
 from . import colors, glass, hero_data, statsapi_ini
-from .applog import mmr_log, set_hotkey_log_enabled
+from .applog import capture_console, mmr_log, set_hotkey_log_enabled
 from .config import load_config, save_config
 from .hotkey import HotkeyManager, MenuHotkeyListener, capture_next_input, is_rl_focused
 from .mmr import MMR_CATEGORIES, MMRClient, RANKED_PLAYLISTS, append_mmr_history, load_mmr_history
 from .overlay import Overlay
 from .paths import (
     DATA_DIR, MATCHES_PATH, MMR_HISTORY_PATH, MY_MMR_LOG_PATH, PLAYERS_PATH,
-    ROOT_DIR, now_iso,
+    now_iso,
 )
 from .glass_h2h import render_idle_pixmap
 from .glass_hero import render_h2h_pixmap
@@ -54,6 +54,10 @@ STATS_API_DISABLED_DETAIL = [("text", "Set"), ("code", "PacketSendRate=2"),
 
 
 def main():
+    # Before anything prints: under pythonw both streams are None and every
+    # print() is silently dropped, which is why the app's diagnostics have
+    # never reached anyone launching from start.bat.
+    capture_console()
     if hasattr(sys.stdout, "reconfigure"):
         with contextlib.suppress(Exception):
             sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -108,6 +112,10 @@ def main():
         menu_key_cb=lambda: cfg.get("menu_hotkey") or "f5",
         is_visible_cb=lambda: state["menu_visible"],
         is_capturing_cb=lambda: state["menu_capture"] is not None,
+        # Same focus rule as the overlay: the menu key is Rocket League's while
+        # the game is up, and everyone else's when it isn't.
+        is_allowed_cb=lambda: (not cfg.get("require_rl_focus", True)
+                               or is_rl_focused()),
     )
 
     # Sanitize the persisted category once at startup — guards against a hand-edited
@@ -312,16 +320,11 @@ def main():
             mmr_history_cache["snapshots"], pl, session.started_at.isoformat())
 
     def _menu_status() -> str:
-        """Version and link state, so the menu answers 'is it working?' too."""
-        parts = []
-        try:
-            v = (ROOT_DIR / "VERSION").read_text(encoding="utf-8").strip().splitlines()[0]
-            if v:
-                parts.append(v if v.startswith("v") else f"v{v}")
-        except (OSError, IndexError):
-            pass
-        parts.append("connected" if state["stats_connected"] else "offline")
-        return " · ".join(parts)
+        """Link state, so the menu also answers 'is it working?'.
+
+        Deliberately not the VERSION file: the updater stores a commit SHA
+        there, which reads as a meaningless UUID in a settings header."""
+        return "connected" if state["stats_connected"] else "not connected"
 
     def rerender_h2h() -> None:
         """Re-run render_html against the saved roster — used both when a match
