@@ -54,6 +54,7 @@ class StatsClient(QObject):
         self._initialized_emitted = False
         self._last_emitted_roster_size = 0
         self._round_started = False  # locks the roster after kickoff
+        self._ended_emitted = False
         self._spectator_warned = False
         self._score: list[int] = [0, 0]
         self._team_colors: dict[int, str] = {}
@@ -195,6 +196,13 @@ class StatsClient(QObject):
         elif event == EVT_MATCH_ENDED:
             self._on_match_ended(data)
         elif event == EVT_MATCH_DESTROYED:
+            # A match that was initialised but never ended is never counted in
+            # the session or written to players.json. Forfeits are the suspected
+            # case: the teardown may not send MatchEnded at all, or may send it
+            # after this. Say so, since the symptom is a silently empty session.
+            if self._initialized_emitted and not self._ended_emitted:
+                print("[stats] match destroyed without MatchEnded — not counted "
+                      "(forfeit or disconnect?)", file=sys.stderr)
             self.match_destroyed.emit()
             self._reset()
         elif event == EVT_REPLAY_CREATED:
@@ -270,7 +278,20 @@ class StatsClient(QObject):
             return
         winner = data.get("WinnerTeamNum")
         if winner is None or self._my_team is None or not self._roster:
+            print(f"[stats] MatchEnded ignored: winner={winner} "
+                  f"my_team={self._my_team} roster={len(self._roster)}",
+                  file=sys.stderr)
             return
+        # A match that never kicked off is not a match. When Rocket League
+        # cancels one — a player fails to connect, the lobby dissolves — it
+        # still reports a WinnerTeamNum, which was being recorded as a real
+        # win against opponents who never played. RoundStarted is the only
+        # signal that a ball was ever put in play.
+        if not self._round_started:
+            print("[stats] MatchEnded before any kickoff — not counted "
+                  "(cancelled match?)", file=sys.stderr)
+            return
+        self._ended_emitted = True
         self.match_ended.emit({
             "winner": int(winner),
             "myTeam": self._my_team,

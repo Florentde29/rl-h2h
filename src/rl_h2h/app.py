@@ -11,16 +11,24 @@ from PySide6.QtCore import QLockFile, QObject, QTimer, Signal
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import QApplication, QMenu, QMessageBox, QSystemTrayIcon
 
-from . import colors, statsapi_ini
-from .applog import mmr_log, set_hotkey_log_enabled
+from . import colors, glass, hero_data, statsapi_ini
+from .applog import capture_console, mmr_log, set_hotkey_log_enabled
 from .config import load_config, save_config
 from .hotkey import HotkeyManager, MenuHotkeyListener, capture_next_input, is_rl_focused
 from .mmr import MMR_CATEGORIES, MMRClient, RANKED_PLAYLISTS, append_mmr_history, load_mmr_history
 from .overlay import Overlay
-from .paths import DATA_DIR, MATCHES_PATH, MMR_HISTORY_PATH, MY_MMR_LOG_PATH, PLAYERS_PATH, now_iso
-from .render_h2h import h2h_footer_html, idle_html, render_html, render_menu_html, session_footer_html
-from .render_summary import render_match_stats_html, render_summary_html
-from .session_stats import MatchStats, SessionStats, render_session_html
+from .paths import (
+    DATA_DIR, MATCHES_PATH, MMR_HISTORY_PATH, MY_MMR_LOG_PATH, PLAYERS_PATH,
+    now_iso,
+)
+from .glass_h2h import render_idle_pixmap
+from .glass_hero import render_h2h_pixmap
+from .glass_screens import (
+    render_menu_pixmap,
+    render_session_pixmap,
+    render_summary_pixmap,
+)
+from .session_stats import MatchStats, SessionStats
 from .stats_client import StatsClient
 from .storage import (
     append_match,
@@ -39,13 +47,17 @@ from .graph import render_graph_pixmap
 # The full diagnosis — file paths and the exact cause — goes to stderr and the
 # tray balloon instead; it's far too long for a status line.
 STATS_API_DISABLED = "Stats API disabled in Rocket League"
-# Overlay variant: idle_html renders as rich text, so <br> puts the instruction
-# on its own line. The tray tooltip and menu use the bare label above — they're
-# single-line plain text and would show the markup verbatim.
-STATS_API_DISABLED_OVERLAY = f"{STATS_API_DISABLED}<br>see README step 4"
+# Overlay variant: the painted status card takes the fix as parts so the
+# setting renders as a chip. The tray tooltip and menu use the bare label above.
+STATS_API_DISABLED_DETAIL = [("text", "Set"), ("code", "PacketSendRate=2"),
+                             ("text", "— README step 4")]
 
 
 def main():
+    # Before anything prints: under pythonw both streams are None and every
+    # print() is silently dropped, which is why the app's diagnostics have
+    # never reached anyone launching from start.bat.
+    capture_console()
     if hasattr(sys.stdout, "reconfigure"):
         with contextlib.suppress(Exception):
             sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -77,16 +89,17 @@ def main():
     if ini_problem:
         print(f"[statsapi] {ini_problem}", file=sys.stderr)
 
-    startup_message = (STATS_API_DISABLED_OVERLAY if ini_problem
-                       else "Waiting for Rocket League…")
+    startup_status = ((STATS_API_DISABLED, STATS_API_DISABLED_DETAIL, True)
+                      if ini_problem
+                      else ("Waiting for Rocket League…", None, False))
 
     overlay = Overlay(cfg)
-    overlay.set_html(idle_html(startup_message))
     stats = StatsClient(cfg["host"], cfg["port"],
                         api_dump_enabled=bool(cfg.get("api_debug_dump", False)))
     session = SessionStats(recent_size=cfg.get("recent_size", 5))
     match_stats = MatchStats()
-    mmr_client = MMRClient(enabled=bool(cfg.get("mmr_enabled", False)))
+    mmr_client = MMRClient(enabled=bool(cfg.get("mmr_enabled", False)),
+                           debug_dump=bool(cfg.get("mmr_debug_dump", False)))
     mmr_client.start()
     hotkey_h2h = HotkeyManager(cfg["hotkeys"])
     hotkey_session = HotkeyManager(cfg.get("session_hotkeys") or [])
@@ -100,6 +113,10 @@ def main():
         menu_key_cb=lambda: cfg.get("menu_hotkey") or "f5",
         is_visible_cb=lambda: state["menu_visible"],
         is_capturing_cb=lambda: state["menu_capture"] is not None,
+        # Same focus rule as the overlay: the menu key is Rocket League's while
+        # the game is up, and everyone else's when it isn't.
+        is_allowed_cb=lambda: (not cfg.get("require_rl_focus", True)
+                               or is_rl_focused()),
     )
 
     # Sanitize the persisted category once at startup — guards against a hand-edited
@@ -113,8 +130,15 @@ def main():
         "h2h_held": False,
         "session_held": False,
         "summary_visible": False,
-        "summary_html": "",
-        "h2h_html": idle_html(startup_message),
+        "summary_payload": None,
+        # Self MMR either side of a match, for the summary's arrow. Only
+        # shown once they differ — the post-match poll lands minutes later.
+        "mmr_before": None,
+        "mmr_after": None,
+        # (title, detail parts, offline) for the painted status card.
+        "h2h_status": startup_status,
+        "mmr_db": {},
+        "self_id": None,
         "h2h_expanded": bool(cfg.get("h2h_default_expanded", False)),
         "session_view": cfg.get("session_view", "session"),
         "graph_playlist": cfg.get("graph_playlist", "2v2"),
@@ -141,9 +165,12 @@ def main():
         # the user opened it deliberately and may want to reach it from the
         # desktop.
         if state["menu_visible"]:
-            overlay.set_html(render_menu_html(
+            overlay.set_pixmap(render_menu_pixmap(
                 _menu_rows(), state["menu_index"], state["menu_capture"] is not None,
-                menu_key=cfg.get("menu_hotkey") or "f5",
+                cfg, menu_key=cfg.get("menu_hotkey") or "f5",
+                status=_menu_status(),
+                width=cfg["width"] - glass.CARD_PAD_X * 2,
+                dpr=overlay.devicePixelRatioF(),
             ))
             overlay.show()
             overlay.raise_()
@@ -164,44 +191,72 @@ def main():
                     mmr_history_cache["snapshots"],
                     mmr_history_cache["matches"],
                     cfg,
-                    canvas_width=cfg["width"] - 32,
+                    # Glass chrome pads 18px each side, and the pixmap is
+                    # painted at the overlay's own device ratio so text stays
+                    # sharp at 125%/150% Windows scaling.
+                    canvas_width=cfg["width"] - glass.CARD_PAD_X * 2,
+                    dpr=overlay.devicePixelRatioF(),
                 )
                 overlay.set_pixmap(pix)
             else:
-                overlay.set_html(
-                    render_session_html(session)
-                    + session_footer_html(cfg, "session")
-                )
+                if mmr_client.is_enabled():
+                    _ensure_graph_data_loaded()
+                overlay.set_pixmap(render_session_pixmap(
+                    session, cfg,
+                    mmr_delta=_session_mmr_delta(),
+                    width=cfg["width"] - glass.CARD_PAD_X * 2,
+                    dpr=overlay.devicePixelRatioF(),
+                ))
         elif state["h2h_held"] and state["in_match"]:
-            if state["h2h_expanded"]:
-                # Expanded H2H shows current-match stats (saves/shots/demos/etc.).
-                # Session aggregates live behind the session-hotkey view instead —
-                # they aren't actionable mid-match.
-                match_body = render_match_stats_html(match_stats)
-                spacer = (
-                    "<table cellpadding='0' cellspacing='0' width='100%'>"
-                    "<tr><td height='28'>&nbsp;</td></tr></table>"
-                ) if match_body else ""
-                overlay.set_html(
-                    state["h2h_html"]
-                    + spacer
-                    + match_body
-                    + h2h_footer_html(cfg, expanded=True, session=None)
-                )
-            else:
-                overlay.set_html(
-                    state["h2h_html"]
-                    + h2h_footer_html(cfg, expanded=False, session=None)
-                )
+            # Expanded H2H adds current-match stats (saves/shots/demos/etc.).
+            # Session aggregates live behind the session-hotkey view instead —
+            # they aren't actionable mid-match.
+            # The hero block needs the MMR history for its sparkline and
+            # session delta — the same cache the graph view reads, so this
+            # shares its mtime-checked load rather than re-parsing.
+            if mmr_client.is_enabled():
+                _ensure_graph_data_loaded()
+            overlay.set_pixmap(render_h2h_pixmap(
+                state["roster"], state["my_team"], state["arena"],
+                players_db, state["team_colors"], cfg,
+                self_id=state.get("self_id") or cfg.get("self_player_id"),
+                mmr_db=state.get("mmr_db"),
+                mmr_category=cfg.get("mmr_category", "best"),
+                mmr_enabled=mmr_client.is_enabled(),
+                match_stats=match_stats if state["h2h_expanded"] else None,
+                expanded=state["h2h_expanded"],
+                session=session,
+                snapshots=mmr_history_cache["snapshots"],
+                matches=mmr_history_cache["matches"],
+                session_started_iso=session.started_at.isoformat(),
+                width=cfg["width"] - glass.CARD_PAD_X * 2,
+                dpr=overlay.devicePixelRatioF(),
+            ))
         elif state["h2h_held"] and not state["stats_connected"]:
-            # Held while the feed is down: explain why, since h2h_html holds the
+            # Held while the feed is down: explain why, since h2h_status holds the
             # reason and used to be rendered only in the in_match branch above —
             # unreachable exactly when disconnected, which is what made the key
             # look dead. Deliberately NOT shown while connected: "waiting for a
             # match" is normal, and a panel on every menu press is just noise.
-            overlay.set_html(state["h2h_html"])
-        elif state["summary_visible"]:
-            overlay.set_html(state["summary_html"])
+            title, detail, offline = state["h2h_status"]
+            overlay.set_pixmap(render_idle_pixmap(
+                cfg, title, detail=detail, offline=offline,
+                width=cfg["width"] - glass.CARD_PAD_X * 2,
+                dpr=overlay.devicePixelRatioF(),
+            ))
+        elif state["summary_visible"] and state["summary_payload"]:
+            payload, ms = state["summary_payload"]
+            won = payload.get("winner") == payload.get("myTeam")
+            overlay.set_pixmap(
+                render_summary_pixmap(
+                    payload, ms, cfg, players_db=players_db,
+                    mmr_before=state.get("mmr_before"),
+                    mmr_after=state.get("mmr_after"),
+                    width=cfg["width"] - glass.CARD_PAD_X * 2,
+                    dpr=overlay.devicePixelRatioF(),
+                ),
+                tint=glass.WIN if won else glass.LOSS,
+            )
         else:
             overlay.hide()
             return
@@ -246,6 +301,32 @@ def main():
 
     summary_timer.timeout.connect(hide_summary)
 
+    def _self_playlist() -> str:
+        """The playlist the hero block is talking about — the category when it
+        names one, otherwise whichever your best rank is in."""
+        cat = cfg.get("mmr_category", "best")
+        if cat not in ("best", "peak"):
+            return cat
+        entry = (state.get("mmr_db") or {}).get(
+            state.get("self_id") or cfg.get("self_player_id"))
+        return ((entry or {}).get("best") or {}).get("playlist") or ""
+
+    def _session_mmr_delta():
+        if not mmr_client.is_enabled():
+            return None
+        pl = _self_playlist()
+        if not pl:
+            return None
+        return hero_data.session_mmr_delta(
+            mmr_history_cache["snapshots"], pl, session.started_at.isoformat())
+
+    def _menu_status() -> str:
+        """Link state, so the menu also answers 'is it working?'.
+
+        Deliberately not the VERSION file: the updater stores a commit SHA
+        there, which reads as a meaningless UUID in a settings header."""
+        return "connected" if state["stats_connected"] else "not connected"
+
     def rerender_h2h() -> None:
         """Re-run render_html against the saved roster — used both when a match
         starts and whenever fresh MMR data lands or the user cycles category."""
@@ -271,13 +352,11 @@ def main():
                     )
             mmr_log(f"rerender_h2h: cat={cfg.get('mmr_category','best')!r} "
                     f"rows=[{', '.join(summary_parts)}]")
-        state["h2h_html"] = render_html(
-            state["roster"], state["my_team"], state["arena"],
-            players_db, state["team_colors"], self_id,
-            mmr_db=mmr_db,
-            mmr_category=cfg.get("mmr_category", "best"),
-            mmr_enabled=mmr_client.is_enabled(),
-        )
+        # The card is painted at draw time now, so this only has to publish a
+        # consistent MMR snapshot for the painter to read. h2h_status is left to
+        # the status messages (waiting / disconnected / Stats API disabled).
+        state["mmr_db"] = mmr_db
+        state["self_id"] = self_id
 
     def _ensure_graph_data_loaded() -> None:
         """First call (or after `dirty` is set) parses the on-disk files into
@@ -348,6 +427,11 @@ def main():
 
     def on_initialized(payload: dict):
         state["in_match"] = True
+        state["mmr_before"] = hero_data.playlist_mmr(
+            (state.get("mmr_db") or {}).get(
+                state.get("self_id") or cfg.get("self_player_id")),
+            cfg.get("mmr_category", "best"))
+        state["mmr_after"] = None
         hide_summary()  # next match starting → drop any in-flight post-match popup
         # Auto-detect self in 1v1: only one teammate on my side = me. Persist to config.
         if not cfg.get("self_player_id"):
@@ -429,7 +513,11 @@ def main():
         # starts (match_initialized) or the user leaves to the menu (match_destroyed),
         # with a 30s safety net for cases where neither event fires.
         if cfg.get("show_match_summary", True):
-            state["summary_html"] = render_summary_html(payload, match_stats)
+            state["summary_payload"] = (payload, match_stats)
+            state["mmr_after"] = hero_data.playlist_mmr(
+                (state.get("mmr_db") or {}).get(
+                    state.get("self_id") or cfg.get("self_player_id")),
+                cfg.get("mmr_category", "best"))
             state["summary_visible"] = True
             focus_timer.start()
             update_overlay()
@@ -438,7 +526,7 @@ def main():
     def on_destroyed():
         state["in_match"] = False
         hide_summary()  # leaving the match → drop the post-match popup
-        state["h2h_html"] = idle_html("Waiting for next match…")
+        state["h2h_status"] = ("Waiting for next match…", None, False)
         update_overlay()
 
     def on_status(connected: bool):
@@ -448,13 +536,14 @@ def main():
         if state["in_match"]:
             return
         if connected:
-            state["h2h_html"] = idle_html("Connected — waiting for match…")
+            state["h2h_status"] = ("Connected — waiting for match…", None, False)
         else:
             # Name the cause when we know it — a generic "is it enabled?" is
             # unhelpful once we've read the .ini and found it switched off.
-            state["h2h_html"] = idle_html(
-                STATS_API_DISABLED_OVERLAY if ini_problem
-                else "Disconnected — is RL running with the Stats API enabled?")
+            state["h2h_status"] = (
+                (STATS_API_DISABLED, STATS_API_DISABLED_DETAIL, True) if ini_problem
+                else ("Disconnected — is RL running with the Stats API enabled?",
+                      None, True))
         update_overlay()
 
     def on_event_for_session(event: str, data: dict):
@@ -892,7 +981,7 @@ def main():
             # The cached H2H card was rendered against the now-wiped opponent
             # records — refresh so a held Tab during this match doesn't show
             # stale W/L counts. (Idle text until the next match starts.)
-            state["h2h_html"] = idle_html("History wiped — fresh start.")
+            state["h2h_status"] = ("History wiped — fresh start.", None, False)
             print("[reset] match history wiped", file=sys.stderr)
             update_overlay()
         wipe_history_action.triggered.connect(_wipe_history)

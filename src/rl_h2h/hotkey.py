@@ -414,11 +414,16 @@ class MenuHotkeyListener(QObject):
     down = Signal()
     enter = Signal()
 
-    def __init__(self, menu_key_cb, is_visible_cb, is_capturing_cb):
+    def __init__(self, menu_key_cb, is_visible_cb, is_capturing_cb,
+                 is_allowed_cb=None):
         super().__init__()
         self._menu_key_cb = menu_key_cb
         self._is_visible_cb = is_visible_cb
         self._is_capturing_cb = is_capturing_cb
+        # Without this the hook claims the menu key across the whole desktop:
+        # the overlay opened over other windows, and worse, the key was
+        # swallowed everywhere — F5 stops refreshing the browser.
+        self._is_allowed_cb = is_allowed_cb or (lambda: True)
         self._held: set[int] = set()
         self._hook = None
         self._thread = None
@@ -492,6 +497,11 @@ class MenuHotkeyListener(QObject):
         is_repeat = vk in self._held
         self._held.add(vk)
 
+        # Pass everything through when the menu has no business acting — the
+        # key belongs to whatever the user is actually using.
+        if not self._is_allowed_cb() and not visible:
+            return False
+
         if menu_vk is not None and vk == menu_vk:
             # During capture, the menu key is being captured as the new
             # binding — let it through to capture_next_input's listener.
@@ -520,6 +530,8 @@ class MenuHotkeyListener(QObject):
         # Non-Windows: dispatch but don't suppress.
         name = _kb_event_name(key)
         if name is None:
+            return
+        if not self._is_allowed_cb() and not self._is_visible_cb():
             return
         capturing = self._is_capturing_cb()
         if name == (self._menu_key_cb() or "f5"):

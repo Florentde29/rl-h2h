@@ -7,7 +7,9 @@ import threading
 from datetime import datetime
 from pathlib import Path
 
-from .paths import API_DUMP_PATH, HOTKEY_LOG_PATH, MMR_LOG_PATH, now_iso
+from .paths import (
+    API_DUMP_PATH, CONSOLE_LOG_PATH, HOTKEY_LOG_PATH, MMR_LOG_PATH, now_iso,
+)
 
 
 # Cap log size at ~256 KB so it doesn't grow forever in long-running sessions.
@@ -84,3 +86,31 @@ def api_dump(event: str, data: dict) -> None:
     except (TypeError, ValueError):
         return
     _append_capped(API_DUMP_PATH, line, API_DUMP_CAP_BYTES, _api_dump_lock)
+
+
+CONSOLE_LOG_CAP = 1024 * 1024
+
+
+def capture_console() -> bool:
+    """Point stdout/stderr at logs/console.log when there is no console.
+
+    start.bat launches with pythonw, where both streams are None and CPython's
+    print() returns early instead of writing. Every diagnostic in the app —
+    connection state, ignored match-end events, failed config saves — was
+    therefore invisible to anyone not launching from a terminal. Returns True
+    if it redirected."""
+    if sys.stdout is not None and sys.stderr is not None:
+        return False
+    try:
+        if (CONSOLE_LOG_PATH.exists()
+                and CONSOLE_LOG_PATH.stat().st_size > CONSOLE_LOG_CAP):
+            CONSOLE_LOG_PATH.unlink()
+        stream = CONSOLE_LOG_PATH.open("a", buffering=1, encoding="utf-8",
+                                       errors="replace")
+    except OSError:
+        return False
+    if sys.stdout is None:
+        sys.stdout = stream
+    if sys.stderr is None:
+        sys.stderr = stream
+    return True

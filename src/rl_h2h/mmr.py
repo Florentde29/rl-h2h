@@ -29,6 +29,7 @@ from .applog import mmr_log
 from .paths import (
     MMR_CACHE_PATH,
     MMR_HISTORY_PATH,
+    TRN_PAYLOAD_PATH,
     load_jsonl,
     now_iso,
     parse_iso,
@@ -55,8 +56,14 @@ MMR_PLAYLIST_IDS = {
 MMR_CATEGORIES = ("best", "1v1", "2v2", "3v3", "peak")
 RANKED_PLAYLISTS = ("1v1", "2v2", "3v3")  # cycled by the cycle hotkey in graph view; iterated for self-MMR logging
 
-# Tier MMR ranges (RL Season 36 ranges, approximate). Anything below the
-# bottom is Bronze; anything above the top is SSL. Used by the graph view.
+# Approximate tier MMR ranges, for the graph's background bands ONLY.
+#
+# Do NOT compute anything from these. Rocket League's real boundaries differ
+# per playlist — 1v1 sits well below 3v3 for the same tier — and Psyonix moves
+# them between seasons, so one fixed table is wrong for at least two of the
+# three playlists at any time. A "points to next rank" figure derived from it
+# was off by hundreds. Tier and division come from TRN, which reports both
+# per playlist and per season; render those instead.
 MMR_RANK_ZONES = [
     (0,    195,  "Bronze",            "#B87333"),
     (195,  395,  "Silver",             "#C0C5CD"),
@@ -85,6 +92,13 @@ MMR_FETCH_INTERVAL = 0.5
 # same roster batch while giving TRN a moment to recover.
 MMR_MAX_RETRIES = 3
 MMR_RETRY_BACKOFF_S = 3.0
+# TRN sits behind Cloudflare, which answers a burst with 403 "You've Been
+# Blocked" in ~50ms. The block is per-IP, not per-player, so continuing to
+# march through the queue just deepens it — every request is spent confirming
+# we are still blocked. The whole worker pauses instead, escalating while the
+# blocks keep coming and resetting on the first success.
+MMR_BLOCK_COOLDOWN_S = 20.0
+MMR_BLOCK_COOLDOWN_MAX_S = 300.0
 
 
 def mmr_lookup_handle(primary_id: str, name: str) -> Optional[tuple[str, str]]:
@@ -138,14 +152,36 @@ def parse_trn_payload(data: dict) -> dict:
             continue
         stats = seg.get("stats") or {}
         rating = (stats.get("rating") or {}).get("value")
-        tier = ((stats.get("tier") or {}).get("metadata") or {}).get("name")
-        div = ((stats.get("division") or {}).get("metadata") or {}).get("name")
+        tier_stat = stats.get("tier") or {}
+        tier = (tier_stat.get("metadata") or {}).get("name")
+        # tier.value is a position on the rank ladder, not a match count despite
+        # its displayName. Verified against a live payload: Gold III=9,
+        # Platinum III=12, Diamond I/II/III=13/14/15, Champion I=16,
+        # Champion II=17, Unranked=0 — three rungs per rank group. It lets us
+        # name the next rank without knowing any MMR boundary.
+        tier_idx = tier_stat.get("value")
+        div_meta = (stats.get("division") or {}).get("metadata") or {}
+        div = div_meta.get("name")
+        # TRN reports how far this player is from ranking up, per playlist and
+        # per season. That is the only trustworthy source for it: Rocket
+        # League's thresholds differ between playlists and move between
+        # seasons, so nothing computed from a local table can be right for
+        # long. Absent on some payloads, hence the guarded read.
+        up = div_meta.get("deltaUp")
+        down = div_meta.get("deltaDown")
         if rating is None:
             continue
         playlists[label] = {
             "mmr": int(rating),
             "tier": tier or "Unranked",
             "division": div or "",
+            "delta_up": int(up) if isinstance(up, (int, float)) else None,
+            "delta_down": int(down) if isinstance(down, (int, float)) else None,
+            "tier_index": int(tier_idx) if isinstance(tier_idx, (int, float)) else None,
+            # 0-based: Division I is 0. Fourth division borders the next rank.
+            "division_index": (int(div_val)
+                               if isinstance(div_val := (stats.get("division") or {}).get("value"),
+                                             (int, float)) else None),
         }
 
     best = None
@@ -229,8 +265,15 @@ class MMRClient(QObject):
         "Accept-Language": "en-US,en;q=0.9",
     }
 
-    def __init__(self, enabled: bool = False, ttl_seconds: int = MMR_TTL_SECONDS):
+    def __init__(self, enabled: bool = False, ttl_seconds: int = MMR_TTL_SECONDS,
+                 debug_dump: bool = False):
         super().__init__()
+        # Writes the next raw TRN payload to logs/ once, then clears itself.
+        self._debug_dump = bool(debug_dump)
+        # Cloudflare block state, shared across every key: the block is on our
+        # address, so one 403 means the next request will fail too.
+        self._blocked_until = 0.0
+        self._block_streak = 0
         self._enabled = bool(enabled)
         self._ttl = max(60, int(ttl_seconds))
         self._cache: dict = load_mmr_cache()
@@ -347,6 +390,21 @@ class MMRClient(QObject):
                 continue
             self.enqueue(pid, p.get("name") or "")
 
+    def _note_block(self) -> None:
+        """Escalating pause after a Cloudflare 403, capped so we recover."""
+        self._block_streak += 1
+        cooldown = min(MMR_BLOCK_COOLDOWN_S * (2 ** (self._block_streak - 1)),
+                       MMR_BLOCK_COOLDOWN_MAX_S)
+        self._blocked_until = time.monotonic() + cooldown
+        mmr_log(f"  TRN blocked us (streak {self._block_streak}) — "
+                f"pausing all lookups {cooldown:.0f}s")
+
+    def _clear_block(self) -> None:
+        if self._block_streak:
+            mmr_log(f"  TRN responding again after {self._block_streak} block(s)")
+        self._block_streak = 0
+        self._blocked_until = 0.0
+
     def _worker(self) -> None:
         last_request = 0.0
         while not self._stop.is_set():
@@ -354,6 +412,12 @@ class MMRClient(QObject):
                 key, plat, ident = self._queue.get(timeout=0.5)
             except queue.Empty:
                 continue
+            blocked_for = self._blocked_until - time.monotonic()
+            if blocked_for > 0:
+                mmr_log(f"blocked by TRN — holding {blocked_for:.0f}s before {key!r}")
+                self._stop.wait(blocked_for)
+                if self._stop.is_set():
+                    break
             since = time.monotonic() - last_request
             if since < MMR_FETCH_INTERVAL:
                 wait = MMR_FETCH_INTERVAL - since
@@ -386,7 +450,7 @@ class MMRClient(QObject):
                     mmr_log(f"  giving up on {key!r} after {MMR_MAX_RETRIES} retries")
             last_request = time.monotonic()
 
-    def _fetch_one(self, key: str, plat: str, ident: str) -> None:
+    def _fetch_one(self, key: str, plat: str, ident: str) -> None:  # noqa: C901
         if self._requests is None:
             mmr_log(f"{key!r} fetch aborted: curl_cffi missing")
             return
@@ -410,8 +474,16 @@ class MMRClient(QObject):
             return
         if r.status_code != 200:
             mmr_log(f"  {key!r} HTTP {r.status_code}: {r.text[:200]!r}")
-            # Server-side hiccups (TRN overloaded, Cloudflare rate-limit) are
-            # often transient — raise so the worker retries with backoff.
+            # 403 is Cloudflare shielding TRN, not a verdict on this player.
+            # It used to return, which let the worker treat the fetch as done:
+            # the key left _inflight, the failure was never cached, and the
+            # next roster re-emit queued it straight back. That loop is what
+            # produced 210 blocks against 163 successes, one account being
+            # re-requested 35 times.
+            if r.status_code == 403:
+                self._note_block()
+                raise RuntimeError("HTTP 403 (rate-limited)")
+            # Server-side hiccups (TRN overloaded, 429) are transient too.
             if r.status_code in (429, 500, 502, 503, 504):
                 raise RuntimeError(f"HTTP {r.status_code}")
             return
@@ -424,6 +496,17 @@ class MMRClient(QObject):
         if not isinstance(data, dict):
             mmr_log(f"  {key!r} no .data in response")
             return
+        # One raw payload on request, so what TRN actually sends can be read
+        # rather than assumed — the fields we rely on are undocumented.
+        if self._debug_dump:
+            self._debug_dump = False
+            try:
+                TRN_PAYLOAD_PATH.write_text(
+                    json.dumps(payload, indent=2)[:2_000_000], encoding="utf-8")
+                mmr_log(f"  raw payload written to {TRN_PAYLOAD_PATH.name}")
+            except OSError as e:
+                mmr_log(f"  could not write raw payload: {e}")
+        self._clear_block()
         entry = parse_trn_payload(data)
         with self._cache_lock:
             self._cache[key] = entry
