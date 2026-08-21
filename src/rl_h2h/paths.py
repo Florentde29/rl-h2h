@@ -32,6 +32,7 @@ MY_MMR_LOG_PATH = LOG_DIR / "my_mmr.log"
 API_DUMP_PATH = LOG_DIR / "api_dump.log"
 HOTKEY_LOG_PATH = LOG_DIR / "hotkey.log"
 CONSOLE_LOG_PATH = LOG_DIR / "console.log"
+TRN_PAYLOAD_PATH = LOG_DIR / "trn_payload.json"
 
 
 def atomic_write_text(path: Path, text: str) -> None:

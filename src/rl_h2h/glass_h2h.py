@@ -41,7 +41,7 @@ RIGHT_INSET = 3
 
 # --- data shaping -----------------------------------------------------------
 def mmr_bits(entry: Optional[dict], category: str) -> tuple:
-    """(tier, tier_hex, mmr, playlist, division) or a one-item placeholder.
+    """(tier, tier_hex, mmr, playlist, division, delta_up) or a placeholder.
 
     Mirrors render_h2h._render_mmr_chip's states so the painted card and the
     HTML one disagree about nothing: no entry means still loading, a not_found
@@ -61,7 +61,8 @@ def mmr_bits(entry: Optional[dict], category: str) -> tuple:
     if not pick or pick.get("mmr") is None:
         return ("—",)
     return (pick.get("tier") or "Unranked", tier_color(pick.get("tier")),
-            pick.get("mmr"), pick.get("playlist"), pick.get("division") or "")
+            pick.get("mmr"), pick.get("playlist"), pick.get("division") or "",
+            pick.get("delta_up"))
 
 
 def match_stat_cells(ms) -> list[tuple[str, str, Optional[str]]]:

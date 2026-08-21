@@ -29,6 +29,7 @@ from .applog import mmr_log
 from .paths import (
     MMR_CACHE_PATH,
     MMR_HISTORY_PATH,
+    TRN_PAYLOAD_PATH,
     load_jsonl,
     now_iso,
     parse_iso,
@@ -145,13 +146,23 @@ def parse_trn_payload(data: dict) -> dict:
         stats = seg.get("stats") or {}
         rating = (stats.get("rating") or {}).get("value")
         tier = ((stats.get("tier") or {}).get("metadata") or {}).get("name")
-        div = ((stats.get("division") or {}).get("metadata") or {}).get("name")
+        div_meta = (stats.get("division") or {}).get("metadata") or {}
+        div = div_meta.get("name")
+        # TRN reports how far this player is from ranking up, per playlist and
+        # per season. That is the only trustworthy source for it: Rocket
+        # League's thresholds differ between playlists and move between
+        # seasons, so nothing computed from a local table can be right for
+        # long. Absent on some payloads, hence the guarded read.
+        up = div_meta.get("deltaUp")
+        down = div_meta.get("deltaDown")
         if rating is None:
             continue
         playlists[label] = {
             "mmr": int(rating),
             "tier": tier or "Unranked",
             "division": div or "",
+            "delta_up": int(up) if isinstance(up, (int, float)) else None,
+            "delta_down": int(down) if isinstance(down, (int, float)) else None,
         }
 
     best = None
@@ -235,8 +246,11 @@ class MMRClient(QObject):
         "Accept-Language": "en-US,en;q=0.9",
     }
 
-    def __init__(self, enabled: bool = False, ttl_seconds: int = MMR_TTL_SECONDS):
+    def __init__(self, enabled: bool = False, ttl_seconds: int = MMR_TTL_SECONDS,
+                 debug_dump: bool = False):
         super().__init__()
+        # Writes the next raw TRN payload to logs/ once, then clears itself.
+        self._debug_dump = bool(debug_dump)
         self._enabled = bool(enabled)
         self._ttl = max(60, int(ttl_seconds))
         self._cache: dict = load_mmr_cache()
@@ -392,7 +406,7 @@ class MMRClient(QObject):
                     mmr_log(f"  giving up on {key!r} after {MMR_MAX_RETRIES} retries")
             last_request = time.monotonic()
 
-    def _fetch_one(self, key: str, plat: str, ident: str) -> None:
+    def _fetch_one(self, key: str, plat: str, ident: str) -> None:  # noqa: C901
         if self._requests is None:
             mmr_log(f"{key!r} fetch aborted: curl_cffi missing")
             return
@@ -430,6 +444,16 @@ class MMRClient(QObject):
         if not isinstance(data, dict):
             mmr_log(f"  {key!r} no .data in response")
             return
+        # One raw payload on request, so what TRN actually sends can be read
+        # rather than assumed — the fields we rely on are undocumented.
+        if self._debug_dump:
+            self._debug_dump = False
+            try:
+                TRN_PAYLOAD_PATH.write_text(
+                    json.dumps(payload, indent=2)[:2_000_000], encoding="utf-8")
+                mmr_log(f"  raw payload written to {TRN_PAYLOAD_PATH.name}")
+            except OSError as e:
+                mmr_log(f"  could not write raw payload: {e}")
         entry = parse_trn_payload(data)
         with self._cache_lock:
             self._cache[key] = entry

@@ -230,13 +230,17 @@ def _draw_hero(painter: QPainter, family: str, x: int, w: int, y: int,
     scope = category.upper()
     if category in ("best", "peak") and playlist:
         scope = f"{scope} · {playlist.upper()}"
-    # Division comes from TRN alongside the tier, so it is correct for this
-    # playlist and this season. It replaces a computed distance-to-next-rank,
-    # which was derived from a fixed table that is neither.
+    # Both of these come from TRN, so they are right for this playlist and
+    # this season. The distance is preferred when present because it is the
+    # thing being asked ("how far to the next rank"); the division names where
+    # you are when TRN does not send one. Neither is computed locally — that
+    # is what produced a figure hundreds of points wrong.
     division = bits[4] if (bits and len(bits) > 4) else ""
+    delta_up = bits[5] if (bits and len(bits) > 5) else None
+    trailer = f"{delta_up} to rank up" if delta_up else division
     for text, fnt, alpha in (
         (scope, glass.font(family, 7, bold=True, letter_spacing=0.10), 0.62),
-        (division, glass.font(family, 8), glass.A_FAINT),
+        (trailer, glass.font(family, 8), glass.A_FAINT),
     ):
         if not text:
             continue

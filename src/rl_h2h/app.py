@@ -98,7 +98,8 @@ def main():
                         api_dump_enabled=bool(cfg.get("api_debug_dump", False)))
     session = SessionStats(recent_size=cfg.get("recent_size", 5))
     match_stats = MatchStats()
-    mmr_client = MMRClient(enabled=bool(cfg.get("mmr_enabled", False)))
+    mmr_client = MMRClient(enabled=bool(cfg.get("mmr_enabled", False)),
+                           debug_dump=bool(cfg.get("mmr_debug_dump", False)))
     mmr_client.start()
     hotkey_h2h = HotkeyManager(cfg["hotkeys"])
     hotkey_session = HotkeyManager(cfg.get("session_hotkeys") or [])
