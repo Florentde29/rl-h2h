@@ -124,3 +124,52 @@ def peak_worth_showing(entry: Optional[dict], current: Optional[int],
         return None
     peak = int(peak)
     return peak if peak - current >= margin else None
+
+
+# Rank ladder positions, as TRN numbers them. Three rungs per group, so the
+# index alone names any rank — including the one above you — without needing
+# a single MMR boundary. Verified against a live payload (Gold III=9,
+# Platinum III=12, Diamond I..III=13..15, Champion I=16, Champion II=17).
+_RANK_GROUPS = ("Bronze", "Silver", "Gold", "Platinum", "Diamond",
+                "Champion", "Grand Champion")
+TIER_LADDER = {0: "Unranked"}
+for _g, _i in ((g, 1 + n * 3) for n, g in enumerate(_RANK_GROUPS)):
+    for _off, _num in enumerate(("I", "II", "III")):
+        TIER_LADDER[_i + _off] = f"{_g} {_num}"
+TIER_LADDER[len(TIER_LADDER)] = "Supersonic Legend"
+
+DIVISIONS_PER_TIER = 4
+
+
+def next_tier_target(pick: Optional[dict]) -> Optional[tuple[int, str, bool]]:
+    """(points, next rank name, exact) — how far to the next RANK, not division.
+
+    TRN's deltaUp is the distance to the next division, which is not what
+    anyone is chasing: Champion I Division II is still Champion I. The rank
+    boundary sits at the top of the fourth division.
+
+    From the fourth division the two coincide, so deltaUp is the answer and
+    `exact` is True. Below that the remaining divisions are added at the width
+    of the current one, which Rocket League splits evenly inside a rank — that
+    part is derived, so `exact` is False and callers should mark it.
+
+    Returns None rather than a guess whenever TRN omits any of the inputs.
+    """
+    if not pick:
+        return None
+    up = pick.get("delta_up")
+    down = pick.get("delta_down")
+    tier_idx = pick.get("tier_index")
+    div_idx = pick.get("division_index")
+    if up is None or tier_idx is None or div_idx is None:
+        return None
+    next_name = TIER_LADDER.get(int(tier_idx) + 1)
+    if not next_name:
+        return None  # already at the top of the ladder
+    if div_idx >= DIVISIONS_PER_TIER - 1:
+        return (int(up), next_name, True)
+    if down is None:
+        return None
+    width = int(up) + int(down)
+    remaining = (DIVISIONS_PER_TIER - 1 - int(div_idx)) * width
+    return (int(up) + remaining, next_name, False)

@@ -145,7 +145,14 @@ def parse_trn_payload(data: dict) -> dict:
             continue
         stats = seg.get("stats") or {}
         rating = (stats.get("rating") or {}).get("value")
-        tier = ((stats.get("tier") or {}).get("metadata") or {}).get("name")
+        tier_stat = stats.get("tier") or {}
+        tier = (tier_stat.get("metadata") or {}).get("name")
+        # tier.value is a position on the rank ladder, not a match count despite
+        # its displayName. Verified against a live payload: Gold III=9,
+        # Platinum III=12, Diamond I/II/III=13/14/15, Champion I=16,
+        # Champion II=17, Unranked=0 — three rungs per rank group. It lets us
+        # name the next rank without knowing any MMR boundary.
+        tier_idx = tier_stat.get("value")
         div_meta = (stats.get("division") or {}).get("metadata") or {}
         div = div_meta.get("name")
         # TRN reports how far this player is from ranking up, per playlist and
@@ -163,6 +170,11 @@ def parse_trn_payload(data: dict) -> dict:
             "division": div or "",
             "delta_up": int(up) if isinstance(up, (int, float)) else None,
             "delta_down": int(down) if isinstance(down, (int, float)) else None,
+            "tier_index": int(tier_idx) if isinstance(tier_idx, (int, float)) else None,
+            # 0-based: Division I is 0. Fourth division borders the next rank.
+            "division_index": (int(div_val)
+                               if isinstance(div_val := (stats.get("division") or {}).get("value"),
+                                             (int, float)) else None),
         }
 
     best = None

@@ -235,9 +235,18 @@ def _draw_hero(painter: QPainter, family: str, x: int, w: int, y: int,
     # thing being asked ("how far to the next rank"); the division names where
     # you are when TRN does not send one. Neither is computed locally — that
     # is what produced a figure hundreds of points wrong.
+    # What is being chased is the next RANK. TRN's own deltaUp counts to the
+    # next division, and Champion I Division II is still Champion I, so that
+    # figure answers a question nobody asks. next_tier_target converts it.
     division = bits[4] if (bits and len(bits) > 4) else ""
-    delta_up = bits[5] if (bits and len(bits) > 5) else None
-    trailer = f"{delta_up} to rank up" if delta_up else division
+    target = hero_data.next_tier_target(bits[5] if (bits and len(bits) > 5) else None)
+    if target:
+        points, next_name, exact = target
+        # A tilde where the last divisions are inferred rather than reported,
+        # so a derived number is never mistaken for a measured one.
+        trailer = f"{points} to {next_name}" if exact else f"~{points} to {next_name}"
+    else:
+        trailer = division
     for text, fnt, alpha in (
         (scope, glass.font(family, 7, bold=True, letter_spacing=0.10), 0.62),
         (trailer, glass.font(family, 8), glass.A_FAINT),
