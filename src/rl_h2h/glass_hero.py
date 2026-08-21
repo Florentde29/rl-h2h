@@ -156,7 +156,7 @@ def _draw_form(painter: QPainter, family: str, right: float, baseline: float,
 
 def _draw_hero(painter: QPainter, family: str, x: int, w: int, y: int,
                name: str, my_mmr: Optional[int], bits, delta: Optional[int],
-               next_rank, playlist: str, category: str, spark: list[int],
+               playlist: str, category: str, spark: list[int],
                recent: list, swatch: str, session, mmr_enabled: bool) -> None:
     """Your row: identity, the number, and where it's heading."""
     right = x + w - RIGHT_INSET
@@ -230,10 +230,13 @@ def _draw_hero(painter: QPainter, family: str, x: int, w: int, y: int,
     scope = category.upper()
     if category in ("best", "peak") and playlist:
         scope = f"{scope} · {playlist.upper()}"
+    # Division comes from TRN alongside the tier, so it is correct for this
+    # playlist and this season. It replaces a computed distance-to-next-rank,
+    # which was derived from a fixed table that is neither.
+    division = bits[4] if (bits and len(bits) > 4) else ""
     for text, fnt, alpha in (
         (scope, glass.font(family, 7, bold=True, letter_spacing=0.10), 0.62),
-        (f"{next_rank[0]} to {next_rank[1]}" if next_rank else "",
-         glass.font(family, 8), glass.A_FAINT),
+        (division, glass.font(family, 8), glass.A_FAINT),
     ):
         if not text:
             continue
@@ -334,7 +337,7 @@ def _draw_tile(painter: QPainter, family: str, x: int, y: int, w: int,
             painter.drawText(int(cx), sub_base, bits[0])
             cx += painter.fontMetrics().horizontalAdvance(bits[0]) + 7
         else:
-            tier, hexc, mmr, _pl = bits
+            tier, hexc, mmr = bits[0], bits[1], bits[2]
             painter.setFont(glass.font(family, 8, bold=True))
             painter.setPen(QPen(QColor(hexc)))
             painter.drawText(int(cx), sub_base, tier)
@@ -403,8 +406,7 @@ def render_h2h_pixmap(roster: list[dict], my_team: int, arena: str,
 
     _draw_hero(painter, family, x, w, y, self_name, my_mmr,
                mmr_bits(self_entry, mmr_category) if mmr_enabled else None,
-               delta, hero_data.next_rank_distance(my_mmr), playlist,
-               mmr_category, spark,
+               delta, playlist, mmr_category, spark,
                list(session.recent) if session else [], swatch_for(my_team),
                session, mmr_enabled)
     y += H_HERO if mmr_enabled else H_HERO_NO_MMR

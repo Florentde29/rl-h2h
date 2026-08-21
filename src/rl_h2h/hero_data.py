@@ -2,13 +2,17 @@
 
 Kept free of Qt so each one can be tested on its own — they are small, but
 several are easy to get subtly wrong (a session delta that counts snapshots
-from yesterday, a rank distance that reads off the wrong end of a band).
+from yesterday, a sparkline that disagrees with the graph it summarises).
+
+Nothing here invents a rank threshold. Rocket League's tier boundaries differ
+per playlist and move between seasons, so anything derived from a fixed table
+is wrong somewhere — rank and division come from TRN, which reports both.
 """
 from __future__ import annotations
 
 from typing import Optional
 
-from .mmr import MMR_RANK_ZONES, attribute_mmr_points
+from .mmr import attribute_mmr_points
 from .paths import parse_iso
 
 
@@ -51,22 +55,6 @@ def session_mmr_delta(snapshots: list[dict], playlist: str,
         return None
     vals.sort(key=lambda v: v[0])
     return vals[-1][1] - vals[0][1]
-
-
-def next_rank_distance(mmr: Optional[int]) -> Optional[tuple[int, str]]:
-    """(points, next band name) — how far to the next rank band.
-
-    Deliberately band-level, not division-level: MMR_RANK_ZONES only knows
-    Champion, not Champion II, and the wire gives us no division thresholds.
-    Callers should phrase it softly for that reason. None at the top band."""
-    if mmr is None:
-        return None
-    for i, (lo, hi, name, _color) in enumerate(MMR_RANK_ZONES):
-        if lo <= mmr < hi:
-            if i + 1 >= len(MMR_RANK_ZONES):
-                return None
-            return (max(0, hi - int(mmr)), MMR_RANK_ZONES[i + 1][2])
-    return None
 
 
 def sparkline(playlist: str, snapshots: list[dict], matches: list[dict],

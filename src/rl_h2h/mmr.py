@@ -55,8 +55,14 @@ MMR_PLAYLIST_IDS = {
 MMR_CATEGORIES = ("best", "1v1", "2v2", "3v3", "peak")
 RANKED_PLAYLISTS = ("1v1", "2v2", "3v3")  # cycled by the cycle hotkey in graph view; iterated for self-MMR logging
 
-# Tier MMR ranges (RL Season 36 ranges, approximate). Anything below the
-# bottom is Bronze; anything above the top is SSL. Used by the graph view.
+# Approximate tier MMR ranges, for the graph's background bands ONLY.
+#
+# Do NOT compute anything from these. Rocket League's real boundaries differ
+# per playlist — 1v1 sits well below 3v3 for the same tier — and Psyonix moves
+# them between seasons, so one fixed table is wrong for at least two of the
+# three playlists at any time. A "points to next rank" figure derived from it
+# was off by hundreds. Tier and division come from TRN, which reports both
+# per playlist and per season; render those instead.
 MMR_RANK_ZONES = [
     (0,    195,  "Bronze",            "#B87333"),
     (195,  395,  "Silver",             "#C0C5CD"),
