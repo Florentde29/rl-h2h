@@ -92,6 +92,13 @@ MMR_FETCH_INTERVAL = 0.5
 # same roster batch while giving TRN a moment to recover.
 MMR_MAX_RETRIES = 3
 MMR_RETRY_BACKOFF_S = 3.0
+# TRN sits behind Cloudflare, which answers a burst with 403 "You've Been
+# Blocked" in ~50ms. The block is per-IP, not per-player, so continuing to
+# march through the queue just deepens it — every request is spent confirming
+# we are still blocked. The whole worker pauses instead, escalating while the
+# blocks keep coming and resetting on the first success.
+MMR_BLOCK_COOLDOWN_S = 20.0
+MMR_BLOCK_COOLDOWN_MAX_S = 300.0
 
 
 def mmr_lookup_handle(primary_id: str, name: str) -> Optional[tuple[str, str]]:
@@ -263,6 +270,10 @@ class MMRClient(QObject):
         super().__init__()
         # Writes the next raw TRN payload to logs/ once, then clears itself.
         self._debug_dump = bool(debug_dump)
+        # Cloudflare block state, shared across every key: the block is on our
+        # address, so one 403 means the next request will fail too.
+        self._blocked_until = 0.0
+        self._block_streak = 0
         self._enabled = bool(enabled)
         self._ttl = max(60, int(ttl_seconds))
         self._cache: dict = load_mmr_cache()
@@ -379,6 +390,21 @@ class MMRClient(QObject):
                 continue
             self.enqueue(pid, p.get("name") or "")
 
+    def _note_block(self) -> None:
+        """Escalating pause after a Cloudflare 403, capped so we recover."""
+        self._block_streak += 1
+        cooldown = min(MMR_BLOCK_COOLDOWN_S * (2 ** (self._block_streak - 1)),
+                       MMR_BLOCK_COOLDOWN_MAX_S)
+        self._blocked_until = time.monotonic() + cooldown
+        mmr_log(f"  TRN blocked us (streak {self._block_streak}) — "
+                f"pausing all lookups {cooldown:.0f}s")
+
+    def _clear_block(self) -> None:
+        if self._block_streak:
+            mmr_log(f"  TRN responding again after {self._block_streak} block(s)")
+        self._block_streak = 0
+        self._blocked_until = 0.0
+
     def _worker(self) -> None:
         last_request = 0.0
         while not self._stop.is_set():
@@ -386,6 +412,12 @@ class MMRClient(QObject):
                 key, plat, ident = self._queue.get(timeout=0.5)
             except queue.Empty:
                 continue
+            blocked_for = self._blocked_until - time.monotonic()
+            if blocked_for > 0:
+                mmr_log(f"blocked by TRN — holding {blocked_for:.0f}s before {key!r}")
+                self._stop.wait(blocked_for)
+                if self._stop.is_set():
+                    break
             since = time.monotonic() - last_request
             if since < MMR_FETCH_INTERVAL:
                 wait = MMR_FETCH_INTERVAL - since
@@ -442,8 +474,16 @@ class MMRClient(QObject):
             return
         if r.status_code != 200:
             mmr_log(f"  {key!r} HTTP {r.status_code}: {r.text[:200]!r}")
-            # Server-side hiccups (TRN overloaded, Cloudflare rate-limit) are
-            # often transient — raise so the worker retries with backoff.
+            # 403 is Cloudflare shielding TRN, not a verdict on this player.
+            # It used to return, which let the worker treat the fetch as done:
+            # the key left _inflight, the failure was never cached, and the
+            # next roster re-emit queued it straight back. That loop is what
+            # produced 210 blocks against 163 successes, one account being
+            # re-requested 35 times.
+            if r.status_code == 403:
+                self._note_block()
+                raise RuntimeError("HTTP 403 (rate-limited)")
+            # Server-side hiccups (TRN overloaded, 429) are transient too.
             if r.status_code in (429, 500, 502, 503, 504):
                 raise RuntimeError(f"HTTP {r.status_code}")
             return
@@ -466,6 +506,7 @@ class MMRClient(QObject):
                 mmr_log(f"  raw payload written to {TRN_PAYLOAD_PATH.name}")
             except OSError as e:
                 mmr_log(f"  could not write raw payload: {e}")
+        self._clear_block()
         entry = parse_trn_payload(data)
         with self._cache_lock:
             self._cache[key] = entry
