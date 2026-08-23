@@ -111,21 +111,6 @@ def last_meeting_phrase(rec: Optional[dict], bucket: str,
     return f"{verb}, {when}"
 
 
-def peak_worth_showing(entry: Optional[dict], current: Optional[int],
-                       margin: int = 40) -> Optional[int]:
-    """Peak MMR, but only when it's meaningfully above the current value.
-
-    Showing a peak that equals where you already are is noise; the margin is
-    what makes it a fact worth the pixels."""
-    if not entry or current is None:
-        return None
-    peak = (entry.get("peak_all_time") or {}).get("mmr")
-    if not isinstance(peak, (int, float)):
-        return None
-    peak = int(peak)
-    return peak if peak - current >= margin else None
-
-
 # Rank ladder positions, as TRN numbers them. Three rungs per group, so the
 # index alone names any rank — including the one above you — without needing
 # a single MMR boundary. Verified against a live payload (Gold III=9,
