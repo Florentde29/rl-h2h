@@ -5,7 +5,9 @@ import contextlib
 import os
 import subprocess
 import sys
+import time
 from datetime import datetime
+from typing import Optional
 
 from PySide6.QtCore import QLockFile, QObject, QTimer, Signal
 from PySide6.QtGui import QAction
@@ -156,58 +158,106 @@ def main():
     if state["graph_playlist"] not in RANKED_PLAYLISTS:
         state["graph_playlist"] = "2v2"
 
+    # Render-invalidation epoch. update_overlay used to re-render the whole
+    # pixmap on every 250ms focus tick while any view was visible — ~4 full
+    # repaints/sec of a card that usually hadn't changed. Now every mutation
+    # that could alter the pixels bumps `epoch`, and a paint is skipped when
+    # the cheap view signature (below) is unchanged since the last one.
+    ui_state = {"epoch": 1, "last_sig": None}
+
+    def touch_ui() -> None:
+        ui_state["epoch"] += 1
+
     def _any_visible() -> bool:
         return (state["h2h_held"] or state["session_held"]
                 or state["summary_visible"])
 
-    def update_overlay():
-        # Settings menu wins over everything and bypasses the focus check —
-        # the user opened it deliberately and may want to reach it from the
-        # desktop.
+    def _current_view() -> Optional[tuple]:
+        """Identity of what should be on screen, computed without rendering.
+
+        Mirrors update_overlay's priority chain. None means hide; the tuple's
+        first element picks the renderer."""
         if state["menu_visible"]:
-            overlay.set_pixmap(render_menu_pixmap(
+            return ("menu", state["menu_index"], state["menu_capture"] is not None)
+        if not _any_visible():
+            return None
+        if cfg.get("require_rl_focus", True) and not is_rl_focused():
+            return ("focus-lost",)
+        if state["session_held"]:
+            return (("graph",) if state["session_view"] == "graph"
+                    else ("session",))
+        if state["h2h_held"]:
+            if state["in_match"]:
+                return ("h2h",)
+            # Idle status card only while the feed is down — "waiting for a
+            # match" while connected is normal, and a panel on every scoreboard
+            # peek would just be noise.
+            if not state["stats_connected"]:
+                return ("idle",)
+        if state["summary_visible"] and state["summary_payload"]:
+            return ("summary", id(state["summary_payload"]))
+        return None
+
+    def update_overlay():
+        view = _current_view()
+        if view is None:
+            ui_state["last_sig"] = None
+            focus_timer.stop()
+            overlay.hide()
+            return
+        if view == ("focus-lost",):
+            # Hide, but KEEP polling: the timer is what notices Rocket League
+            # regaining focus while the key is still held.
+            ui_state["last_sig"] = None
+            overlay.hide()
+            return
+        # The session duration label and H2H "x m ago" phrases age without any
+        # event firing, so those two views also re-render when the minute rolls.
+        ages = view[0] in ("session", "h2h")
+        sig = (view, ui_state["epoch"], int(time.time() // 60) if ages else 0,
+               cfg["width"], overlay.devicePixelRatioF())
+        if sig == ui_state["last_sig"]:
+            overlay.follow_cursor_screen()
+            overlay.show()
+            overlay.raise_()
+            return
+
+        pix = tint = None
+        kind = view[0]
+        if kind == "menu":
+            # Settings menu wins over everything and bypasses the focus check —
+            # the user opened it deliberately and may want to reach it from the
+            # desktop.
+            pix = render_menu_pixmap(
                 _menu_rows(), state["menu_index"], state["menu_capture"] is not None,
                 cfg, menu_key=cfg.get("menu_hotkey") or "f5",
                 status=_menu_status(),
                 width=cfg["width"] - glass.CARD_PAD_X * 2,
                 dpr=overlay.devicePixelRatioF(),
-            ))
-            overlay.show()
-            overlay.raise_()
-            return
-        if not _any_visible():
-            focus_timer.stop()
-            overlay.hide()
-            return
-        if cfg.get("require_rl_focus", True) and not is_rl_focused():
-            overlay.hide()
-            return
-        # Priority: held keys win over the auto-popup. Session > H2H > summary.
-        if state["session_held"]:
-            if state["session_view"] == "graph":
+            )
+        elif kind == "graph":
+            _ensure_graph_data_loaded()
+            pix = render_graph_pixmap(
+                state["graph_playlist"],
+                mmr_history_cache["snapshots"],
+                mmr_history_cache["matches"],
+                cfg,
+                # Glass chrome pads 18px each side, and the pixmap is
+                # painted at the overlay's own device ratio so text stays
+                # sharp at 125%/150% Windows scaling.
+                canvas_width=cfg["width"] - glass.CARD_PAD_X * 2,
+                dpr=overlay.devicePixelRatioF(),
+            )
+        elif kind == "session":
+            if mmr_client.is_enabled():
                 _ensure_graph_data_loaded()
-                pix = render_graph_pixmap(
-                    state["graph_playlist"],
-                    mmr_history_cache["snapshots"],
-                    mmr_history_cache["matches"],
-                    cfg,
-                    # Glass chrome pads 18px each side, and the pixmap is
-                    # painted at the overlay's own device ratio so text stays
-                    # sharp at 125%/150% Windows scaling.
-                    canvas_width=cfg["width"] - glass.CARD_PAD_X * 2,
-                    dpr=overlay.devicePixelRatioF(),
-                )
-                overlay.set_pixmap(pix)
-            else:
-                if mmr_client.is_enabled():
-                    _ensure_graph_data_loaded()
-                overlay.set_pixmap(render_session_pixmap(
-                    session, cfg,
-                    mmr_delta=_session_mmr_delta(),
-                    width=cfg["width"] - glass.CARD_PAD_X * 2,
-                    dpr=overlay.devicePixelRatioF(),
-                ))
-        elif state["h2h_held"] and state["in_match"]:
+            pix = render_session_pixmap(
+                session, cfg,
+                mmr_delta=_session_mmr_delta(),
+                width=cfg["width"] - glass.CARD_PAD_X * 2,
+                dpr=overlay.devicePixelRatioF(),
+            )
+        elif kind == "h2h":
             # Expanded H2H adds current-match stats (saves/shots/demos/etc.).
             # Session aggregates live behind the session-hotkey view instead —
             # they aren't actionable mid-match.
@@ -216,7 +266,7 @@ def main():
             # shares its mtime-checked load rather than re-parsing.
             if mmr_client.is_enabled():
                 _ensure_graph_data_loaded()
-            overlay.set_pixmap(render_h2h_pixmap(
+            pix = render_h2h_pixmap(
                 state["roster"], state["my_team"], state["arena"],
                 players_db, state["team_colors"], cfg,
                 self_id=state.get("self_id") or cfg.get("self_player_id"),
@@ -231,41 +281,53 @@ def main():
                 session_started_iso=session.started_at.isoformat(),
                 width=cfg["width"] - glass.CARD_PAD_X * 2,
                 dpr=overlay.devicePixelRatioF(),
-            ))
-        elif state["h2h_held"] and not state["stats_connected"]:
+            )
+        elif kind == "idle":
             # Held while the feed is down: explain why, since h2h_status holds the
             # reason and used to be rendered only in the in_match branch above —
             # unreachable exactly when disconnected, which is what made the key
             # look dead. Deliberately NOT shown while connected: "waiting for a
             # match" is normal, and a panel on every menu press is just noise.
             title, detail, offline = state["h2h_status"]
-            overlay.set_pixmap(render_idle_pixmap(
+            pix = render_idle_pixmap(
                 cfg, title, detail=detail, offline=offline,
                 width=cfg["width"] - glass.CARD_PAD_X * 2,
                 dpr=overlay.devicePixelRatioF(),
-            ))
-        elif state["summary_visible"] and state["summary_payload"]:
+            )
+        elif kind == "summary":
             payload, ms = state["summary_payload"]
             won = payload.get("winner") == payload.get("myTeam")
-            overlay.set_pixmap(
-                render_summary_pixmap(
-                    payload, ms, cfg, players_db=players_db,
-                    mmr_before=state.get("mmr_before"),
-                    mmr_after=state.get("mmr_after"),
-                    width=cfg["width"] - glass.CARD_PAD_X * 2,
-                    dpr=overlay.devicePixelRatioF(),
-                ),
-                tint=glass.WIN if won else glass.LOSS,
+            pix = render_summary_pixmap(
+                payload, ms, cfg, players_db=players_db,
+                mmr_before=state.get("mmr_before"),
+                mmr_after=state.get("mmr_after"),
+                width=cfg["width"] - glass.CARD_PAD_X * 2,
+                dpr=overlay.devicePixelRatioF(),
             )
+            tint = glass.WIN if won else glass.LOSS
+
+        if pix is not None:
+            overlay.set_pixmap(pix, tint=tint)
+            overlay.show()
+            overlay.raise_()
+            ui_state["last_sig"] = sig
         else:
             overlay.hide()
-            return
-        overlay.show()
-        overlay.raise_()
 
     focus_timer = QTimer()
     focus_timer.setInterval(250)
     focus_timer.timeout.connect(update_overlay)
+
+    # Hotkey toggles persist their choice; writing config.json synchronously on
+    # every F7/F6 press meant a sync disk write mid-game per keypress. Coalesce:
+    # last write within the window wins.
+    cfg_save_timer = QTimer()
+    cfg_save_timer.setSingleShot(True)
+    cfg_save_timer.setInterval(800)
+    cfg_save_timer.timeout.connect(lambda: save_config(cfg))
+
+    def save_config_soon() -> None:
+        cfg_save_timer.start()
 
     def on_h2h_pressed():
         state["h2h_held"] = True
@@ -295,6 +357,7 @@ def main():
     def hide_summary():
         summary_timer.stop()
         state["summary_visible"] = False
+        touch_ui()
         if not _any_visible():
             focus_timer.stop()
         update_overlay()
@@ -330,6 +393,9 @@ def main():
     def rerender_h2h() -> None:
         """Re-run render_html against the saved roster — used both when a match
         starts and whenever fresh MMR data lands or the user cycles category."""
+        # Publishes a new mmr_db snapshot, so any held-view repaint must pick it
+        # up — bump even when there's no roster (the summary reads mmr_db too).
+        touch_ui()
         if not state["roster"]:
             mmr_log("rerender_h2h: skip (no roster)")
             return
@@ -385,6 +451,7 @@ def main():
         mmr_history_cache["mtime_matches"] = match_mtime
         mmr_history_cache["loaded"] = True
         mmr_history_cache["dirty"] = False
+        touch_ui()
 
     # Post-match self-MMR polling state. The token is bumped on each new poll
     # so callbacks scheduled by an earlier poll can self-cancel — important
@@ -427,14 +494,18 @@ def main():
 
     def on_initialized(payload: dict):
         state["in_match"] = True
+        touch_ui()
         state["mmr_before"] = hero_data.playlist_mmr(
             (state.get("mmr_db") or {}).get(
                 state.get("self_id") or cfg.get("self_player_id")),
             cfg.get("mmr_category", "best"))
         state["mmr_after"] = None
         hide_summary()  # next match starting → drop any in-flight post-match popup
-        # Auto-detect self in 1v1: only one teammate on my side = me. Persist to config.
-        if not cfg.get("self_player_id"):
+        # Auto-detect self in 1v1: exactly two players and only one on my side.
+        # The player-count guard matters because rosters grow asynchronously in
+        # 2v2/3v3 — at the first emit your side can legitimately list just you,
+        # which the old check misread as a 1v1. Persist to config.
+        if not cfg.get("self_player_id") and len(payload["players"]) == 2:
             mt = payload["myTeam"]
             same_side = [p for p in payload["players"] if p["team"] == mt]
             if len(same_side) == 1:
@@ -475,6 +546,7 @@ def main():
 
     def on_ended(payload: dict):
         state["in_match"] = False
+        touch_ui()
         session.on_match_ended(payload)
         i_won = payload["winner"] == payload["myTeam"]
         record = {
@@ -525,6 +597,7 @@ def main():
 
     def on_destroyed():
         state["in_match"] = False
+        touch_ui()
         hide_summary()  # leaving the match → drop the post-match popup
         state["h2h_status"] = ("Waiting for next match…", None, False)
         update_overlay()
@@ -533,6 +606,7 @@ def main():
         # Recorded before the in-match early return, or the flag goes stale for
         # the whole match and update_overlay would misjudge the idle panel.
         state["stats_connected"] = connected
+        touch_ui()
         if state["in_match"]:
             return
         if connected:
@@ -552,6 +626,7 @@ def main():
         if state["in_match"]:
             session.on_event(event, data)
             match_stats.on_event(event, data)
+            touch_ui()
 
     stats.match_initialized.connect(on_initialized)
     stats.match_ended.connect(on_ended)
@@ -567,16 +642,17 @@ def main():
         # Context-sensitive: when the session key is held, the expand key swaps
         # the session sub-view between session card and graph. Otherwise (Tab
         # held or nothing held), it keeps the existing H2H-expand toggle behavior.
+        touch_ui()
         if state["session_held"]:
             nxt = "graph" if state["session_view"] == "session" else "session"
             state["session_view"] = nxt
             cfg["session_view"] = nxt
-            save_config(cfg)
+            save_config_soon()
             print(f"[overlay] session_view={nxt}", file=sys.stderr)
         else:
             state["h2h_expanded"] = not state["h2h_expanded"]
             cfg["h2h_default_expanded"] = state["h2h_expanded"]
-            save_config(cfg)
+            save_config_soon()
             print(f"[overlay] expanded={state['h2h_expanded']}", file=sys.stderr)
         update_overlay()
 
@@ -587,13 +663,14 @@ def main():
         # + session_view=="graph"), the cycle key cycles the graph's playlist
         # instead of the H2H MMR category. Same key, different role per context
         # — same idea as the expand key (expand H2H vs swap session subview).
+        touch_ui()
         if state["session_held"] and state["session_view"] == "graph":
             cur_pl = state["graph_playlist"]
             i = RANKED_PLAYLISTS.index(cur_pl) if cur_pl in RANKED_PLAYLISTS else -1
             nxt_pl = RANKED_PLAYLISTS[(i + 1) % len(RANKED_PLAYLISTS)]
             state["graph_playlist"] = nxt_pl
             cfg["graph_playlist"] = nxt_pl
-            save_config(cfg)
+            save_config_soon()
             mmr_log(f"cycle_graph_playlist: {cur_pl!r} -> {nxt_pl!r}")
             update_overlay()
             return
@@ -604,7 +681,7 @@ def main():
             i = -1
         nxt = MMR_CATEGORIES[(i + 1) % len(MMR_CATEGORIES)]
         cfg["mmr_category"] = nxt
-        save_config(cfg)
+        save_config_soon()
         mmr_log(f"cycle_category: {cur!r} -> {nxt!r}")
         rerender_h2h()
         update_overlay()
@@ -645,7 +722,8 @@ def main():
     def apply_toggle(cfg_key: str, value: bool, on_applied=None) -> None:
         """Persist a bool config flag and run optional side effects."""
         cfg[cfg_key] = bool(value)
-        save_config(cfg)
+        save_config_soon()
+        touch_ui()
         if on_applied is not None:
             on_applied(bool(value))
 
@@ -735,6 +813,7 @@ def main():
     capture_bridge = _CaptureBridge()
 
     def _on_captured(name):
+        touch_ui()
         action_key = state["menu_capture"]
         state["menu_capture"] = None
         if action_key is None:
@@ -753,7 +832,7 @@ def main():
                 update_overlay()
                 return
             cfg["menu_hotkey"] = name
-            save_config(cfg)
+            save_config_soon()
             # MenuHotkeyListener reads cfg via its menu_key_cb on each event,
             # so the new key is picked up on the next press without a restart.
             mmr_log(f"menu rebind: menu_hotkey = {name!r}")
@@ -768,7 +847,7 @@ def main():
         current = list(cfg.get(action_key) or [])
         new_bindings = _replace_binding_slot(current, name)
         cfg[action_key] = new_bindings
-        save_config(cfg)
+        save_config_soon()
         for cfg_key, _label, mgr in rebindable:
             if cfg_key == action_key:
                 mgr.set_bindings(new_bindings)
@@ -906,9 +985,22 @@ def main():
     mmr_repaint_timer.setSingleShot(True)
 
     def _mmr_repaint():
-        if state["in_match"]:
+        # In match: refresh the H2H card as opponents resolve. Summary visible:
+        # the post-match poll's whole point is rolling self MMR a few minutes
+        # after MatchEnded — re-snapshot mmr_db and update mmr_after so the
+        # summary's "before → after" line can actually appear. (This used to
+        # repaint only while in_match, which is exactly when the summary is
+        # not showing, so the line never arrived.)
+        if not (state["in_match"] or state["summary_visible"]):
+            return
+        if mmr_client.is_enabled():
             rerender_h2h()
-            update_overlay()
+            if state["summary_visible"]:
+                sid = state.get("self_id") or cfg.get("self_player_id")
+                state["mmr_after"] = hero_data.playlist_mmr(
+                    (state.get("mmr_db") or {}).get(sid),
+                    cfg.get("mmr_category", "best"))
+        update_overlay()
 
     mmr_repaint_timer.timeout.connect(_mmr_repaint)
     mmr_client.updated.connect(on_mmr_updated)
@@ -951,6 +1043,7 @@ def main():
         def _reset_session():
             session.reset()
             match_stats.reset(self_name=session.self_name)
+            touch_ui()
             print("[reset] session stats cleared", file=sys.stderr)
             update_overlay()
         reset_session_action.triggered.connect(_reset_session)
@@ -982,6 +1075,7 @@ def main():
             # records — refresh so a held Tab during this match doesn't show
             # stale W/L counts. (Idle text until the next match starts.)
             state["h2h_status"] = ("History wiped — fresh start.", None, False)
+            touch_ui()
             print("[reset] match history wiped", file=sys.stderr)
             update_overlay()
         wipe_history_action.triggered.connect(_wipe_history)
