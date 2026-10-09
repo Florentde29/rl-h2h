@@ -17,6 +17,7 @@ from __future__ import annotations
 import bisect
 import json
 import queue
+import random
 import sys
 import threading
 import time
@@ -81,17 +82,25 @@ MMR_RANK_ZONES = [
 # MMR_RANK_ZONES with an explicit Unranked entry (zones cover ranked play only).
 MMR_TIER_COLORS = {"Unranked": "#8E9379", **{name: color for _lo, _hi, name, color in MMR_RANK_ZONES}}
 
-MMR_TTL_SECONDS = 600   # local cache freshness — TRN's own TTL is 4 min
+MMR_TTL_SECONDS = 600   # self freshness — TRN's own TTL is 4 min
+# Everyone else. A party teammate used to be re-fetched every match (25 times
+# in one log) for a number that moves ~10 per game. An hour-old rank is still
+# the right hint, and every request we skip is one TRN can't block.
+MMR_OTHERS_TTL_SECONDS = 3600
 # How long cache entries may sit on disk before being pruned at startup.
 # Positive entries are worth keeping for weeks (a returning opponent's rank is
 # still a useful hint while the fresh fetch loads); negative (not_found)
 # entries go stale much faster — players rename, TRN catches up.
 MMR_CACHE_MAX_AGE_DAYS = 45
 MMR_CACHE_NEGATIVE_MAX_AGE_DAYS = 14
-# Min seconds between outbound TRN requests. TRN's median latency is ~500ms,
-# so this floor only kicks in on fast responses — effectively caps us at 2
-# req/sec without ever burst-blasting. A 6-player roster resolves in ~3s.
-MMR_FETCH_INTERVAL = 0.5
+# Min seconds between outbound TRN requests, plus up to MMR_FETCH_JITTER of
+# random slack so a roster isn't a metronome. Since mid-2026 TRN blocks hard
+# on bursts: in the Aug log, requests < 0.8s after the previous one were
+# blocked 63% of the time vs ~25% at a 1s+ gap. A 6-player lobby now resolves
+# in ~15s — still before kickoff for the first players, and cached ranks show
+# meanwhile.
+MMR_FETCH_INTERVAL = 2.0
+MMR_FETCH_JITTER = 1.0
 # Transient failures (curl timeout, 5xx, 429) get retried automatically.
 # Without this, a single 15s timeout used to strand a player as "…" for the
 # whole match — on_initialized only re-enqueues on a new match boundary.
@@ -296,8 +305,17 @@ class MMRClient(QObject):
     }
 
     def __init__(self, enabled: bool = False, ttl_seconds: int = MMR_TTL_SECONDS,
-                 debug_dump: bool = False):
+                 debug_dump: bool = False, self_key_cb=lambda: None):
         super().__init__()
+        # Self keeps the short TTL (the post-match poll and graph want fresh
+        # numbers); everyone else gets MMR_OTHERS_TTL_SECONDS. A callback since
+        # self can be auto-detected mid-session.
+        self._self_key_cb = self_key_cb
+        # Keys of the current lobby (plus self). Anything queued for a player
+        # outside it — last match's roster, a retry timer firing late — is
+        # dropped at dequeue instead of spending a request (and, while TRN is
+        # blocking us, a cooldown) on a rank nobody will see. None = no filter.
+        self._wanted: Optional[set[str]] = None
         # Writes the next raw TRN payload to logs/ once, then clears itself.
         self._debug_dump = bool(debug_dump)
         # Cloudflare block state, shared across every key: the block is on our
@@ -371,7 +389,7 @@ class MMRClient(QObject):
             entry = self._cache.get(key)
             return dict(entry) if entry else None
 
-    def _is_stale(self, entry: Optional[dict]) -> bool:
+    def _is_stale(self, key: str, entry: Optional[dict]) -> bool:
         if not entry:
             return True
         ts = entry.get("fetched_at")
@@ -382,7 +400,8 @@ class MMRClient(QObject):
         except ValueError:
             return True
         age = (datetime.now(timezone.utc) - t).total_seconds()
-        return age >= self._ttl
+        ttl = self._ttl if key == self._self_key_cb() else max(self._ttl, MMR_OTHERS_TTL_SECONDS)
+        return age >= ttl
 
     def enqueue(self, primary_id: str, name: str, force: bool = False) -> None:
         """Queue a refresh for this opponent. Skips if disabled or already
@@ -402,7 +421,7 @@ class MMRClient(QObject):
         if not force:
             with self._cache_lock:
                 entry = self._cache.get(key)
-            if not self._is_stale(entry):
+            if not self._is_stale(key, entry):
                 mmr_log(f"enqueue skip {key!r} ({name!r}): cache fresh "
                         f"(fetched_at={entry.get('fetched_at')!r})")
                 return
@@ -421,6 +440,12 @@ class MMRClient(QObject):
         """Convenience: queue every player in a match roster."""
         mmr_log(f"enqueue_roster: {len(roster)} player(s) "
                 f"(enabled={self._enabled}, curl_cffi={self._requests is not None})")
+        wanted = {player_key(pid) for p in roster
+                  if (pid := p.get("primaryId") or p.get("key"))}
+        self_key = self._self_key_cb()
+        if self_key:
+            wanted.add(self_key)
+        self._wanted = wanted
         for p in roster:
             pid = p.get("primaryId") or p.get("key")
             if not pid:
@@ -459,6 +484,14 @@ class MMRClient(QObject):
                     key, plat, ident = self._queue.get(timeout=0.5)
                 except queue.Empty:
                     continue
+                wanted = self._wanted
+                if wanted is not None and key not in wanted:
+                    self._retry_count.pop(key, None)
+                    self._inflight.discard(key)
+                    mmr_log(f"drop {key!r}: no longer in the lobby")
+                    if self._queue.empty():
+                        self._flush_cache()
+                    continue
                 blocked_for = self._blocked_until - time.monotonic()
                 if blocked_for > 0:
                     mmr_log(f"blocked by TRN — holding {blocked_for:.0f}s before {key!r}")
@@ -466,8 +499,9 @@ class MMRClient(QObject):
                     if self._stop.is_set():
                         break
                 since = time.monotonic() - last_request
-                if since < MMR_FETCH_INTERVAL:
-                    wait = MMR_FETCH_INTERVAL - since
+                gap = MMR_FETCH_INTERVAL + random.uniform(0, MMR_FETCH_JITTER)
+                if since < gap:
+                    wait = gap - since
                     mmr_log(f"throttle wait {wait:.2f}s before {key!r}")
                     self._stop.wait(wait)
                     if self._stop.is_set():
