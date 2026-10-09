@@ -14,6 +14,7 @@ our cache.
 """
 from __future__ import annotations
 
+import bisect
 import json
 import queue
 import sys
@@ -81,6 +82,12 @@ MMR_RANK_ZONES = [
 MMR_TIER_COLORS = {"Unranked": "#8E9379", **{name: color for _lo, _hi, name, color in MMR_RANK_ZONES}}
 
 MMR_TTL_SECONDS = 600   # local cache freshness — TRN's own TTL is 4 min
+# How long cache entries may sit on disk before being pruned at startup.
+# Positive entries are worth keeping for weeks (a returning opponent's rank is
+# still a useful hint while the fresh fetch loads); negative (not_found)
+# entries go stale much faster — players rename, TRN catches up.
+MMR_CACHE_MAX_AGE_DAYS = 45
+MMR_CACHE_NEGATIVE_MAX_AGE_DAYS = 14
 # Min seconds between outbound TRN requests. TRN's median latency is ~500ms,
 # so this floor only kicks in on fast responses — effectively caps us at 2
 # req/sec without ever burst-blasting. A 6-player roster resolves in ~3s.
@@ -229,6 +236,29 @@ def save_mmr_cache(cache: dict) -> None:
     safe_atomic_write_text(MMR_CACHE_PATH, json.dumps(cache, indent=2, sort_keys=True), "mmr")
 
 
+def _prune_mmr_cache(cache: dict) -> int:
+    """Drop on-disk entries past their keep-forever horizon. Returns the count.
+
+    The cache previously only ever grew — every opponent ever met stayed in
+    mmr_cache.json forever, and the whole file was rewritten per fetch."""
+    now = datetime.now(timezone.utc)
+    stale: list[str] = []
+    for key, entry in cache.items():
+        if not isinstance(entry, dict):
+            continue
+        try:
+            age = now - datetime.fromisoformat(entry.get("fetched_at"))
+        except (TypeError, ValueError):
+            continue  # undated/malformed: leave it, _is_stale already distrusts it
+        max_age = timedelta(days=MMR_CACHE_NEGATIVE_MAX_AGE_DAYS
+                            if entry.get("not_found") else MMR_CACHE_MAX_AGE_DAYS)
+        if age >= max_age:
+            stale.append(key)
+    for key in stale:
+        del cache[key]
+    return len(stale)
+
+
 def append_mmr_history(entry: dict) -> None:
     """One JSON line per snapshot of self MMR. Append-only."""
     try:
@@ -287,7 +317,15 @@ class MMRClient(QObject):
                 del self._cache[k]
             save_mmr_cache(self._cache)
             mmr_log(f"purged {len(steam_nf)} stale Steam not_found entries (re-fetch with SteamID)")
+        pruned = _prune_mmr_cache(self._cache)
+        if pruned:
+            save_mmr_cache(self._cache)
+            mmr_log(f"pruned {pruned} cache entries past their max age")
         self._cache_lock = threading.Lock()
+        # Fetches used to rewrite mmr_cache.json synchronously per player — a
+        # 3v3 lobby meant ~6 full-file dumps within a few seconds. Mark dirty
+        # instead; the worker flushes once the queue drains.
+        self._cache_dirty = False
         self._queue: "queue.Queue[tuple[str, str, str]]" = queue.Queue()
         self._inflight: set[str] = set()
         # Per-key retry counter for transient failures. Cleared on success or
@@ -405,50 +443,64 @@ class MMRClient(QObject):
         self._block_streak = 0
         self._blocked_until = 0.0
 
+    def _flush_cache(self) -> None:
+        """Persist the cache if any fetch dirtied it. Worker-thread only."""
+        if not self._cache_dirty:
+            return
+        self._cache_dirty = False
+        with self._cache_lock:
+            save_mmr_cache(self._cache)
+
     def _worker(self) -> None:
         last_request = 0.0
-        while not self._stop.is_set():
-            try:
-                key, plat, ident = self._queue.get(timeout=0.5)
-            except queue.Empty:
-                continue
-            blocked_for = self._blocked_until - time.monotonic()
-            if blocked_for > 0:
-                mmr_log(f"blocked by TRN — holding {blocked_for:.0f}s before {key!r}")
-                self._stop.wait(blocked_for)
-                if self._stop.is_set():
-                    break
-            since = time.monotonic() - last_request
-            if since < MMR_FETCH_INTERVAL:
-                wait = MMR_FETCH_INTERVAL - since
-                mmr_log(f"throttle wait {wait:.2f}s before {key!r}")
-                self._stop.wait(wait)
-                if self._stop.is_set():
-                    break
-            try:
-                self._fetch_one(key, plat, ident)
-                self._retry_count.pop(key, None)
-                self._inflight.discard(key)
-            except Exception as e:
-                mmr_log(f"{key!r} fetch FAILED: {type(e).__name__}: {e}")
-                n = self._retry_count.get(key, 0) + 1
-                if n <= MMR_MAX_RETRIES:
-                    self._retry_count[key] = n
-                    delay = MMR_RETRY_BACKOFF_S * n
-                    mmr_log(f"  retry {n}/{MMR_MAX_RETRIES} scheduled in {delay:.1f}s")
-                    # Keep _inflight set so concurrent enqueues from another
-                    # on_initialized batch dedupe instead of double-fetching.
-                    t = threading.Timer(
-                        delay,
-                        lambda k=key, p=plat, i=ident: self._queue.put((k, p, i)),
-                    )
-                    t.daemon = True
-                    t.start()
-                else:
+        try:
+            while not self._stop.is_set():
+                try:
+                    key, plat, ident = self._queue.get(timeout=0.5)
+                except queue.Empty:
+                    continue
+                blocked_for = self._blocked_until - time.monotonic()
+                if blocked_for > 0:
+                    mmr_log(f"blocked by TRN — holding {blocked_for:.0f}s before {key!r}")
+                    self._stop.wait(blocked_for)
+                    if self._stop.is_set():
+                        break
+                since = time.monotonic() - last_request
+                if since < MMR_FETCH_INTERVAL:
+                    wait = MMR_FETCH_INTERVAL - since
+                    mmr_log(f"throttle wait {wait:.2f}s before {key!r}")
+                    self._stop.wait(wait)
+                    if self._stop.is_set():
+                        break
+                try:
+                    self._fetch_one(key, plat, ident)
                     self._retry_count.pop(key, None)
                     self._inflight.discard(key)
-                    mmr_log(f"  giving up on {key!r} after {MMR_MAX_RETRIES} retries")
-            last_request = time.monotonic()
+                except Exception as e:
+                    mmr_log(f"{key!r} fetch FAILED: {type(e).__name__}: {e}")
+                    n = self._retry_count.get(key, 0) + 1
+                    if n <= MMR_MAX_RETRIES:
+                        self._retry_count[key] = n
+                        delay = MMR_RETRY_BACKOFF_S * n
+                        mmr_log(f"  retry {n}/{MMR_MAX_RETRIES} scheduled in {delay:.1f}s")
+                        # Keep _inflight set so concurrent enqueues from another
+                        # on_initialized batch dedupe instead of double-fetching.
+                        t = threading.Timer(
+                            delay,
+                            lambda k=key, p=plat, i=ident: self._queue.put((k, p, i)),
+                        )
+                        t.daemon = True
+                        t.start()
+                    else:
+                        self._retry_count.pop(key, None)
+                        self._inflight.discard(key)
+                        mmr_log(f"  giving up on {key!r} after {MMR_MAX_RETRIES} retries")
+                last_request = time.monotonic()
+                # Queue drained: flush whatever this batch fetched in one write.
+                if self._queue.empty():
+                    self._flush_cache()
+        finally:
+            self._flush_cache()
 
     def _fetch_one(self, key: str, plat: str, ident: str) -> None:  # noqa: C901
         if self._requests is None:
@@ -468,7 +520,7 @@ class MMRClient(QObject):
                     "not_found": True,
                     "handle": ident,
                 }
-                save_mmr_cache(self._cache)
+            self._cache_dirty = True
             mmr_log(f"  {key!r} NOT FOUND (cached negative)")
             self.updated.emit(key)
             return
@@ -510,7 +562,7 @@ class MMRClient(QObject):
         entry = parse_trn_payload(data)
         with self._cache_lock:
             self._cache[key] = entry
-            save_mmr_cache(self._cache)
+        self._cache_dirty = True
         best = entry.get("best") or {}
         pl = entry.get("playlists") or {}
         pl_str = " ".join(
@@ -561,6 +613,21 @@ def attribute_mmr_points(playlist: str, snapshots: list[dict],
     past_steps: list[float] = []
     grace = grace_seconds
 
+    # Pre-parse match times once, then bisect each snapshot interval instead of
+    # rescanning every match for every pair — O(S·logM) rather than O(S·M),
+    # which matters once mmr_history.jsonl spans multiple seasons. Selection
+    # semantics are identical to the old linear scan (t_prev <= t_m <= cutoff).
+    # Sorted by the parsed time (not the raw string) so bisect is valid even if
+    # stored timestamps mix offset formats.
+    timed: list[tuple[datetime, dict]] = []
+    for m in pl_matches_sorted:
+        t_m = parse_iso(m.get("endedAt"))
+        if t_m is not None:
+            timed.append((t_m, m))
+    timed.sort(key=lambda tm: tm[0])
+    pl_times = [t for t, _ in timed]
+    pl_by_time = [m for _, m in timed]
+
     for s_prev, s_cur in zip(relevant_snaps, relevant_snaps[1:]):
         mmr_prev = (s_prev.get("playlists") or {}).get(playlist)
         mmr_cur = (s_cur.get("playlists") or {}).get(playlist)
@@ -577,13 +644,9 @@ def attribute_mmr_points(playlist: str, snapshots: list[dict],
             points.append({"x": s_cur.get("ts"), "mmr": cumulative, "marker": "snap"})
             continue
         cutoff = t_cur + timedelta(seconds=grace)
-        interval_matches = []
-        for m in pl_matches_sorted:
-            t_m = parse_iso(m.get("endedAt"))
-            if t_m is None:
-                continue
-            if t_prev <= t_m <= cutoff:
-                interval_matches.append(m)
+        lo = bisect.bisect_left(pl_times, t_prev)
+        hi = bisect.bisect_right(pl_times, cutoff)
+        interval_matches = pl_by_time[lo:hi]
 
         if not interval_matches:
             if delta == 0:

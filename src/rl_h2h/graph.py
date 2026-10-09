@@ -39,9 +39,14 @@ def _draw_marker(painter: QPainter, x: int, y: int, color: QColor, radius: float
 
 
 def _tier_at(mmr: float) -> tuple[str, str] | None:
+    # Half-open [lo, hi) intervals: adjacent zones share their edge values, and
+    # the inclusive test used to paint a boundary value (e.g. 195) with the
+    # lower tier's colour even though the higher zone starts there.
     for lo, hi, name, color in MMR_RANK_ZONES:
-        if lo <= mmr <= hi:
+        if lo <= mmr < hi:
             return name, color
+    if mmr >= MMR_RANK_ZONES[-1][0]:  # at/above SSL's nominal ceiling
+        return MMR_RANK_ZONES[-1][2], MMR_RANK_ZONES[-1][3]
     return None
 
 

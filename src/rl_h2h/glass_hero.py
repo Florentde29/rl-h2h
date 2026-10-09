@@ -44,7 +44,6 @@ H_FOOT = 15
 
 SPARK_W = 104
 SPARK_H = 34
-NAME_MAX = 20
 
 
 def _elide(painter: QPainter, text: str, max_w: float) -> str:

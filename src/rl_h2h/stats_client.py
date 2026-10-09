@@ -26,6 +26,12 @@ from .storage import last_touch_player, player_key
 
 SPECTATOR_FIELDS = ("Boost", "bBoosting", "bOnGround", "bOnWall", "bSupersonic")
 
+# If the stream ever delivers bytes that don't decode as JSON, nothing is
+# consumed from the buffer and it would grow without bound for the rest of
+# the session. Real envelopes are a few KB; past this, the connection is
+# garbage — drop it and let the reconnect loop start clean.
+_MAX_PENDING_BUFFER = 1_000_000
+
 
 class StatsClient(QObject):
     """Reads the Rocket League Stats API local TCP socket and emits match-lifecycle signals."""
@@ -124,6 +130,10 @@ class StatsClient(QObject):
                         obj, idx = decoder.raw_decode(stripped)
                     except json.JSONDecodeError:
                         buf = stripped
+                        if len(buf) > _MAX_PENDING_BUFFER:
+                            print(f"[stats] {len(buf)} bytes without a decodable "
+                                  f"message — dropping connection", file=sys.stderr)
+                            return
                         break
                     buf = stripped[idx:]
                     self._safe_handle(obj)

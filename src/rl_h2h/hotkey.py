@@ -4,6 +4,7 @@ from __future__ import annotations
 import ctypes
 import sys
 import threading
+import time
 from ctypes import wintypes
 from typing import Optional
 
@@ -142,6 +143,13 @@ class _KBDLLHOOKSTRUCT(ctypes.Structure):
     ]
 
 
+# Cache of the last foreground-PID → is-RL verdict. update_overlay polls this
+# several times a second; re-opening the process and querying its image name on
+# every tick was wasted work whenever the user stayed in one window. Threads
+# race benignly — worst case the exe is resolved twice.
+_fg_cache = {"pid": None, "is_rl": False}
+
+
 def is_rl_focused() -> bool:
     """True when Rocket League is the foreground window. Always True on non-Windows."""
     if _user32 is None or _kernel32 is None:
@@ -152,14 +160,19 @@ def is_rl_focused() -> bool:
             return False
         pid = wintypes.DWORD()
         _user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-        h_proc = _kernel32.OpenProcess(0x1000, False, pid.value)  # PROCESS_QUERY_LIMITED_INFORMATION
+        pid_val = pid.value
+        if pid_val == _fg_cache["pid"]:
+            return _fg_cache["is_rl"]
+        h_proc = _kernel32.OpenProcess(0x1000, False, pid_val)  # PROCESS_QUERY_LIMITED_INFORMATION
         if not h_proc:
             return False
         try:
             buf = ctypes.create_unicode_buffer(260)
             size = wintypes.DWORD(260)
             if _kernel32.QueryFullProcessImageNameW(h_proc, 0, buf, ctypes.byref(size)):
-                return buf.value.lower().endswith("rocketleague.exe")
+                _fg_cache["pid"] = pid_val
+                _fg_cache["is_rl"] = buf.value.lower().endswith("rocketleague.exe")
+                return _fg_cache["is_rl"]
         finally:
             _kernel32.CloseHandle(h_proc)
     except Exception:
@@ -390,6 +403,14 @@ def _name_to_vk(name: Optional[str]) -> Optional[int]:
     return None
 
 
+# A KEYDOWN whose predecessor arrived within this window is auto-repeat.
+# Generous vs the ~30ms OS repeat interval; short enough that a missed KEYUP
+# (hook hiccup, focus steal) only swallows one extra press instead of
+# permanently marking the key held — which used to make the menu stop
+# responding to that key until restart.
+_REPEAT_WINDOW_S = 0.6
+
+
 class MenuHotkeyListener(QObject):
     """Keyboard listener for the in-game settings menu.
 
@@ -425,6 +446,7 @@ class MenuHotkeyListener(QObject):
         # swallowed everywhere — F5 stops refreshing the browser.
         self._is_allowed_cb = is_allowed_cb or (lambda: True)
         self._held: set[int] = set()
+        self._last_down: dict[int, float] = {}
         self._hook = None
         self._thread = None
         self._thread_id = 0
@@ -479,6 +501,7 @@ class MenuHotkeyListener(QObject):
                 msg = int(w_param)
                 if msg in (_WM_KEYUP, _WM_SYSKEYUP):
                     self._held.discard(vk)
+                    self._last_down.pop(vk, None)
                 elif msg in (_WM_KEYDOWN, _WM_SYSKEYDOWN):
                     if self._handle_keydown(vk):
                         return 1  # suppress
@@ -494,8 +517,11 @@ class MenuHotkeyListener(QObject):
         capturing = self._is_capturing_cb()
         visible = self._is_visible_cb()
         menu_vk = _name_to_vk(self._menu_key_cb())
-        is_repeat = vk in self._held
+        now = time.monotonic()
+        is_repeat = (vk in self._held
+                     and now - self._last_down.get(vk, 0.0) < _REPEAT_WINDOW_S)
         self._held.add(vk)
+        self._last_down[vk] = now
 
         # Pass everything through when the menu has no business acting — the
         # key belongs to whatever the user is actually using.
