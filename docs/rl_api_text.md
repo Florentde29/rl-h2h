@@ -320,7 +320,13 @@ Supersonic threshold ≈ `2200` UU/s.
   `ReplayWillEnd` (no `Goal` prefix). We don't dispatch on it; flagging in
   case Psyonix fixes one or the other later.
 - Match end signal for persisting H2H records: `MatchEnded` (carries
-  `WinnerTeamNum`); `MatchDestroyed` is a fallback when the user quits early.
+  `WinnerTeamNum`). After a deciding goal it only arrives once the goal
+  replay is over, so leaving during that replay produces `MatchDestroyed`
+  with no `MatchEnded` at all (seen 4 Nov 2026: an overtime loss, destroyed
+  2 s after the goal). `StatsClient` still counts such a match when an
+  overtime goal had decided it — the scorer's team wins, one goal up.
+  A mid-game leave or forfeit is not counted: the API has no forfeit
+  event, so the official result is unknown.
 - `Arena` is the asset name (`Stadium_P`, `TrainStation_Night_P`, …). Pretty
   names live in `rl_h2h.py` (`ARENA_BASE` + variant suffixes).
 - `MatchGuid` is **only present for online/LAN matches** — don't rely on it
