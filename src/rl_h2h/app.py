@@ -487,6 +487,13 @@ def main():
             if i >= len(delays_ms):
                 mmr_log("poll: budget exhausted (10 min, 6 attempts)")
                 return
+            # enqueue() would refuse anyway; stopping here also ends the timer
+            # chain instead of logging a skip every 2 min.
+            wait = mmr_client.challenge_remaining()
+            if wait > 0:
+                mmr_log(f"poll: stopping, tracker.gg captcha back-off "
+                        f"({wait / 60:.0f} min left)")
+                return
             mmr_log(f"poll: attempt #{i+1}/{len(delays_ms)} (force-refresh)")
             mmr_client.enqueue(pid, name, force=True)
             QTimer.singleShot(120_000, lambda: attempt(i + 1))
