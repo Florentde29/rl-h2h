@@ -101,7 +101,8 @@ MMR_CACHE_NEGATIVE_MAX_AGE_DAYS = 14
 # meanwhile.
 MMR_FETCH_INTERVAL = 2.0
 MMR_FETCH_JITTER = 1.0
-# Transient failures (curl timeout, 5xx, 429) get retried automatically.
+# Transient failures (curl timeout, 5xx, 403/plain 429) get retried
+# automatically. A captcha challenge is not transient and is never retried.
 # Without this, a single 15s timeout used to strand a player as "…" for the
 # whole match — on_initialized only re-enqueues on a new match boundary.
 # Linear backoff (3s, 6s, 9s) keeps the worker free for other players in the
@@ -115,6 +116,23 @@ MMR_RETRY_BACKOFF_S = 3.0
 # blocks keep coming and resetting on the first success.
 MMR_BLOCK_COOLDOWN_S = 20.0
 MMR_BLOCK_COOLDOWN_MAX_S = 300.0
+# tracker.gg's own bot check answers 429 "Warden::Challenge" ("must solve a
+# captcha to continue"). Unlike a Cloudflare 403 it doesn't lift in seconds:
+# from 30 Oct 2026 it refused 1,020+ requests in a row while every player was
+# retried three times and self was polled six times a match. While it holds,
+# nothing is queued and nothing is retried. Once the cooldown runs out, one
+# request checks whether it has lifted; each refusal doubles the cooldown.
+MMR_CHALLENGE_COOLDOWN_S = 15 * 60.0
+MMR_CHALLENGE_COOLDOWN_MAX_S = 2 * 60 * 60.0
+
+
+class TRNChallenged(RuntimeError):
+    """tracker.gg wants a captcha solved. Aimed at us, not at one player, so
+    retrying that player is pointless."""
+
+
+def is_captcha_challenge(status_code: int, body: str) -> bool:
+    return status_code == 429 and ("Warden" in body or "captcha" in body.lower())
 
 
 def mmr_lookup_handle(primary_id: str, name: str) -> Optional[tuple[str, str]]:
@@ -322,6 +340,10 @@ class MMRClient(QObject):
         # address, so one 403 means the next request will fail too.
         self._blocked_until = 0.0
         self._block_streak = 0
+        # Captcha challenge state (see MMR_CHALLENGE_COOLDOWN_S). Written by the
+        # worker, read by enqueue() on the Qt thread.
+        self._challenged_until = 0.0
+        self._challenge_streak = 0
         self._enabled = bool(enabled)
         self._ttl = max(60, int(ttl_seconds))
         self._cache: dict = load_mmr_cache()
@@ -384,6 +406,10 @@ class MMRClient(QObject):
     def is_enabled(self) -> bool:
         return self._enabled and self._requests is not None
 
+    def challenge_remaining(self) -> float:
+        """Seconds left in the captcha back-off; 0 when lookups may go out."""
+        return max(0.0, self._challenged_until - time.monotonic())
+
     def get(self, key: str) -> Optional[dict]:
         with self._cache_lock:
             entry = self._cache.get(key)
@@ -414,6 +440,12 @@ class MMRClient(QObject):
             return
         if self._requests is None:
             mmr_log(f"enqueue skip {key!r} ({name!r}): curl_cffi missing")
+            return
+        # Before the force check: a forced self refresh is refused like any other.
+        wait = self.challenge_remaining()
+        if wait > 0:
+            mmr_log(f"enqueue skip {key!r} ({name!r}): tracker.gg captcha "
+                    f"back-off, {wait / 60:.0f} min left")
             return
         if key in self._inflight:
             mmr_log(f"enqueue skip {key!r} ({name!r}): already in-flight")
@@ -462,11 +494,28 @@ class MMRClient(QObject):
         mmr_log(f"  TRN blocked us (streak {self._block_streak}) — "
                 f"pausing all lookups {cooldown:.0f}s")
 
+    def _note_challenge(self) -> None:
+        """Long, escalating stop after a captcha challenge."""
+        self._challenge_streak += 1
+        cooldown = min(MMR_CHALLENGE_COOLDOWN_S * (2 ** (self._challenge_streak - 1)),
+                       MMR_CHALLENGE_COOLDOWN_MAX_S)
+        self._challenged_until = time.monotonic() + cooldown
+        mmr_log(f"  tracker.gg wants a captcha (streak {self._challenge_streak}) — "
+                f"no lookups for {cooldown / 60:.0f} min")
+
     def _clear_block(self) -> None:
-        if self._block_streak:
-            mmr_log(f"  TRN responding again after {self._block_streak} block(s)")
+        if self._block_streak or self._challenge_streak:
+            mmr_log(f"  TRN responding again after {self._block_streak} block(s), "
+                    f"{self._challenge_streak} captcha challenge(s)")
         self._block_streak = 0
         self._blocked_until = 0.0
+        self._challenge_streak = 0
+        self._challenged_until = 0.0
+
+    def _forget(self, key: str) -> None:
+        """Stop tracking a key the worker is not going to fetch."""
+        self._retry_count.pop(key, None)
+        self._inflight.discard(key)
 
     def _flush_cache(self) -> None:
         """Persist the cache if any fetch dirtied it. Worker-thread only."""
@@ -486,9 +535,16 @@ class MMRClient(QObject):
                     continue
                 wanted = self._wanted
                 if wanted is not None and key not in wanted:
-                    self._retry_count.pop(key, None)
-                    self._inflight.discard(key)
-                    mmr_log(f"drop {key!r}: no longer in the lobby")
+                    drop_reason = "no longer in the lobby"
+                elif self.challenge_remaining() > 0:
+                    # The rest of a roster queued before the challenge, or a
+                    # retry timer firing after it.
+                    drop_reason = "tracker.gg captcha back-off"
+                else:
+                    drop_reason = None
+                if drop_reason:
+                    self._forget(key)
+                    mmr_log(f"drop {key!r}: {drop_reason}")
                     if self._queue.empty():
                         self._flush_cache()
                     continue
@@ -508,8 +564,9 @@ class MMRClient(QObject):
                         break
                 try:
                     self._fetch_one(key, plat, ident)
-                    self._retry_count.pop(key, None)
-                    self._inflight.discard(key)
+                    self._forget(key)
+                except TRNChallenged:
+                    self._forget(key)  # _note_challenge has logged it
                 except Exception as e:
                     mmr_log(f"{key!r} fetch FAILED: {type(e).__name__}: {e}")
                     n = self._retry_count.get(key, 0) + 1
@@ -526,8 +583,7 @@ class MMRClient(QObject):
                         t.daemon = True
                         t.start()
                     else:
-                        self._retry_count.pop(key, None)
-                        self._inflight.discard(key)
+                        self._forget(key)
                         mmr_log(f"  giving up on {key!r} after {MMR_MAX_RETRIES} retries")
                 last_request = time.monotonic()
                 # Queue drained: flush whatever this batch fetched in one write.
@@ -566,11 +622,15 @@ class MMRClient(QObject):
             # next roster re-emit queued it straight back. That loop is what
             # produced 210 blocks against 163 successes, one account being
             # re-requested 35 times.
-            if r.status_code == 403:
+            if is_captcha_challenge(r.status_code, r.text):
+                self._note_challenge()
+                raise TRNChallenged("HTTP 429 (captcha challenge)")
+            # A plain 429 is a rate limit on our address, same as the 403.
+            if r.status_code in (403, 429):
                 self._note_block()
-                raise RuntimeError("HTTP 403 (rate-limited)")
-            # Server-side hiccups (TRN overloaded, 429) are transient too.
-            if r.status_code in (429, 500, 502, 503, 504):
+                raise RuntimeError(f"HTTP {r.status_code} (rate-limited)")
+            # Server-side hiccups (TRN overloaded) are transient too.
+            if r.status_code in (500, 502, 503, 504):
                 raise RuntimeError(f"HTTP {r.status_code}")
             return
         try:
