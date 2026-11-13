@@ -11,6 +11,7 @@ EVT_GOAL_SCORED = "GoalScored"
 EVT_BALL_HIT = "BallHit"
 EVT_CROSSBAR_HIT = "CrossbarHit"
 EVT_STATFEED = "StatfeedEvent"
+EVT_CLOCK_UPDATED = "ClockUpdatedSeconds"
 
 # StatfeedEvent.EventName values we explicitly track.
 SF_SAVE = "Save"

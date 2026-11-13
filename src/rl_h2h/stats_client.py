@@ -12,6 +12,7 @@ from PySide6.QtCore import QObject, Signal
 
 from .applog import api_dump
 from .constants import (
+    EVT_CLOCK_UPDATED,
     EVT_GOAL_SCORED,
     EVT_MATCH_CREATED,
     EVT_MATCH_DESTROYED,
@@ -66,6 +67,10 @@ class StatsClient(QObject):
         self._team_colors: dict[int, str] = {}
         self._in_replay = False
         self._update_state_count_this_match = 0
+        self._overtime = False
+        # (winner, final score) once the result can no longer change but
+        # MatchEnded hasn't arrived yet. See _note_goal.
+        self._decided: Optional[tuple[int, list[int]]] = None
 
     def start(self):
         self._thread.start()
@@ -187,10 +192,14 @@ class StatsClient(QObject):
         if event == EVT_GOAL_SCORED:
             if self._classify_goal_scored(data):
                 self.event_seen.emit(event, data)
+                self._note_goal(data)
         elif event:
             self.event_seen.emit(event, data)
         if event == EVT_UPDATE_STATE:
             self._on_update_state(data)
+        elif event == EVT_CLOCK_UPDATED:
+            if isinstance(data.get("bOvertime"), bool):
+                self._overtime = data["bOvertime"]
         elif event == EVT_MATCH_CREATED:
             self._reset()
             self._match_guid = data.get("MatchGuid")
@@ -207,12 +216,21 @@ class StatsClient(QObject):
             self._on_match_ended(data)
         elif event == EVT_MATCH_DESTROYED:
             # A match that was initialised but never ended is never counted in
-            # the session or written to players.json. Forfeits are the suspected
-            # case: the teardown may not send MatchEnded at all, or may send it
-            # after this. Say so, since the symptom is a silently empty session.
+            # the session or written to players.json, unless its result was
+            # already certain (an overtime goal). Otherwise it is a mid-game
+            # leave or forfeit: the API has no forfeit event, so the official
+            # result is unknown. Say so, since the symptom is a silently
+            # empty session.
             if self._initialized_emitted and not self._ended_emitted:
-                print("[stats] match destroyed without MatchEnded — not counted "
-                      "(forfeit or disconnect?)", file=sys.stderr)
+                if self._decided is not None:
+                    winner, score = self._decided
+                    print(f"[stats] match destroyed before MatchEnded, but an "
+                          f"overtime goal had decided it — counted (winner team "
+                          f"{winner}, {score[0]}–{score[1]})", file=sys.stderr)
+                    self._emit_match_ended(winner, score)
+                else:
+                    print("[stats] match destroyed without MatchEnded — not counted "
+                          "(left mid-game or forfeit?)", file=sys.stderr)
             self.match_destroyed.emit()
             self._reset()
         elif event == EVT_REPLAY_CREATED:
@@ -242,6 +260,8 @@ class StatsClient(QObject):
                         if (int(tn) not in self._team_colors and isinstance(cp, str)
                                 and len(cp) == 6):
                             self._team_colors[int(tn)] = "#" + cp.upper()
+            if isinstance(game.get("bOvertime"), bool):
+                self._overtime = game["bOvertime"]
         # Once the round has actually started (kickoff fired), the roster is locked.
         # Until then we keep accumulating — players load asynchronously in 2v2/3v3.
         if self._round_started:
@@ -301,16 +321,40 @@ class StatsClient(QObject):
             print("[stats] MatchEnded before any kickoff — not counted "
                   "(cancelled match?)", file=sys.stderr)
             return
+        self._emit_match_ended(int(winner), list(self._score))
+
+    def _emit_match_ended(self, winner: int, score: list[int]) -> None:
         self._ended_emitted = True
         self.match_ended.emit({
-            "winner": int(winner),
+            "winner": winner,
             "myTeam": self._my_team,
             "arena": self._arena,
             "matchGuid": self._match_guid,
             "players": list(self._roster.values()),
-            "score": list(self._score),
+            "score": score,
             "teamColors": dict(self._team_colors),
         })
+
+    def _note_goal(self, data: dict) -> None:
+        """Remember the result once an overtime goal settles it.
+
+        MatchEnded only follows the goal replay, so leaving during the replay
+        used to drop a match whose result was already certain — on 4 Nov an
+        overtime loss was destroyed 2 s after the goal and never recorded.
+        Only called for real goals (placeholders are filtered out first); for
+        an own goal Scorer.TeamNum is still the team whose score went up."""
+        if (not self._overtime or not self._round_started or self._in_replay
+                or self._decided is not None):
+            return
+        team = (data.get("Scorer") or {}).get("TeamNum")
+        if team not in (0, 1):
+            return
+        # Overtime starts level and the loser's score can't move, so the
+        # final score is exact whether or not UpdateState has caught up.
+        score = [0, 0]
+        score[1 - team] = self._score[1 - team]
+        score[team] = self._score[1 - team] + 1
+        self._decided = (team, score)
 
     def _classify_goal_scored(self, data: dict) -> bool:
         """Set ``bOwnGoal`` on data; return False for placeholder events.
